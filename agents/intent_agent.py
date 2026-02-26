@@ -64,9 +64,17 @@ def intent_node(state: AgentState) -> dict:
     trace += dump_state(state)
 
     trace += [
-        f"### LLM 호출",
-        f"- input: `{user_input}`",
-        f"### LLM 출력",
+        f"### 🔷 FM 입력 (→ Gemini {GEMINI_MODEL})",
+        f"- **System**: INTENT_SYSTEM_PROMPT (의도 6개 + JSON형식 + 매핑규칙, {len(INTENT_SYSTEM_PROMPT)}자)",
+        f"- **Human**:",
+        f"```",
+        f"{prompt_text}",
+        f"```",
+        f"### 🔶 FM 출력 (← Gemini)",
+        f"```json",
+        f"{raw}",
+        f"```",
+        f"### 파싱 결과",
         f"- intent: `{intent}`",
         f"- detail: `{detail}`",
         f"- reasoning: {reasoning}",

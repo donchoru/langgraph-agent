@@ -1,98 +1,28 @@
-# 예시 5: 일반 대화 (general_chat)
+# 예시 5: 일반 대화 — 최단 경로 패턴 (Tool 미사용)
 
-> **학습 목표**: Tool을 호출하지 않는 **최단 경로**. IntentAgent → ResponseAgent로 직행하며, InfoAgent와 ToolNode를 완전히 건너뛴다. 조건부 라우팅의 핵심 분기점을 보여주는 예시.
+> **학습 목표**: `general_chat` 의도는 InfoAgent를 거치지 않고 ResponseAgent로 직행하는 **최단 경로**.
+> FM이 2번만 호출되며, Tool이 전혀 사용되지 않는 패턴을 추적한다.
 
 ---
 
-## 사용자 입력
+## 입력
 
 ```
 안녕하세요
 ```
 
-## 에이전트 처리 흐름
-
-```
-사용자: "안녕하세요"
-  │
-  ▼
-[Step 1] IntentAgent
-  │  intent: "general_chat"
-  │  reasoning: "물류 장비 관련 질문이 아닌 일반적인 인사말입니다."
-  │
-  ▼  intent == "general_chat" → InfoAgent 스킵, ResponseAgent로 직행
-[Step 2] ResponseAgent (일반 대화 모드)
-  │  Tool 바인딩 없는 별도 LLM 호출
-  │  → "안녕하세요! 무엇을 도와드릴까요? 혹시 물류 장비 관리에 대해 궁금한 점이 있으신가요?"
-  │
-  ▼
-사용자에게 응답 출력
-```
-
-**전체 2단계** — 다른 예시(4~5단계)와 비교하면 절반 이하의 처리량.
-
 ---
 
-## 핵심 설계 포인트
+## Step 1: IntentAgent (의도분석)
 
-### 1. 조건부 라우팅 — route_intent 함수
-
-```python
-# graph/workflow.py
-def route_intent(state: AgentState) -> str:
-    if state["intent"] == "general_chat":
-        return "respond"    # → ResponseAgent로 직행
-    return "info_agent"     # → InfoAgent로
+### FM 입력 (-> Gemini gemini-2.0-flash)
+- **System**: INTENT_SYSTEM_PROMPT (의도 6개 + JSON형식 + 매핑규칙, 984자)
+- **Human**:
+```
+안녕하세요
 ```
 
-LangGraph의 `add_conditional_edges`:
-```python
-graph.add_conditional_edges(
-    "intent_agent",
-    route_intent,
-    {"info_agent": "info_agent", "respond": "respond"},
-)
-```
-
-**설계 의도**: 일반 대화에 SQL 조회가 불필요. 불필요한 Tool 호출을 방지하여 응답 속도 향상 + 비용 절감.
-
-### 2. ResponseAgent의 이중 경로
-
-```python
-# agents/info_agent.py — respond_node
-def respond_node(state: AgentState) -> dict:
-    if state["intent"] == "general_chat":
-        # 경로 A: Tool 바인딩 없는 별도 LLM으로 대화 응답 생성
-        response = chat_llm.invoke([...])
-        return {"final_answer": response.content, ...}
-    else:
-        # 경로 B: messages에서 마지막 AI 응답 추출
-        ...
-```
-
-| 경로 | 진입 조건 | LLM | Tool 바인딩 |
-|------|----------|-----|------------|
-| A (일반 대화) | `intent == "general_chat"` | 별도 `chat_llm` | 없음 |
-| B (정보 조회) | 그 외 모든 intent | 불필요 (이미 생성됨) | — |
-
-**경로 A에서 별도 LLM을 쓰는 이유**: InfoAgent의 LLM은 7개 Tool이 바인딩되어 있어 Tool 호출을 시도할 수 있음.
-일반 대화에서는 Tool 호출이 불필요하므로, Tool 바인딩 없는 순수 대화 LLM 사용.
-
-### 3. 일반 대화의 시스템 프롬프트
-
-ResponseAgent의 일반 대화 모드에서는 간단한 프롬프트 적용:
-
-```
-"당신은 물류 장비 부하율 관리 시스템의 대화 Agent입니다.
-물류와 무관한 질문에는 간단히 답하고, 물류 관련 질문을 유도하세요."
-```
-
-**효과**: "오늘 날씨 어때?" 같은 질문에도 답하되, "혹시 물류 장비 관리에 대해 궁금한 점이 있으신가요?"로 자연스럽게 유도.
-
----
-
-## IntentAgent 출력 상세
-
+### FM 출력 (<- Gemini)
 ```json
 {
   "intent": "general_chat",
@@ -101,57 +31,74 @@ ResponseAgent의 일반 대화 모드에서는 간단한 프롬프트 적용:
     "line": "",
     "zone": "",
     "equipment_id": "",
+    "lot_id": "",
     "hours": 0,
     "keyword": ""
   },
-  "reasoning": "물류 장비 관련 질문이 아닌 일반적인 인사말입니다."
+  "reasoning": "물류 장비 관련 내용이 없는 일반적인 인사말입니다."
 }
 ```
 
-`detail`의 모든 필드가 비어있음 — 추출할 파라미터 자체가 없으므로 당연.
+> **포인트**: "안녕하세요"에 장비, 부하율, 알림 관련 키워드가 없으므로 `general_chat`으로 분류.
+> detail의 모든 필드가 빈 값.
 
-## 최종 응답 (final_answer)
+---
 
+## 라우팅: general_chat -> ResponseAgent 직행
+
+```
+route_by_intent("general_chat") → "respond_node"
+```
+
+> **핵심**: `general_chat`은 InfoAgent(Tool 루프)를 **완전히 건너뛰고** ResponseAgent로 직행.
+> 다른 의도는 `info_node` -> `tool_node` -> `info_node` -> `respond_node` 경로를 탐.
+
+---
+
+## Step 2: ResponseAgent (응답생성, 일반대화)
+
+### FM 입력 (-> Gemini gemini-2.0-flash, 일반대화)
+- **System**: "당신은 친절한 물류 장비 관리 시스템 어시스턴트입니다. 물류와 무관한 질문에는 간단히 답하고, 물류 관련 질문을 유도하세요." (69자)
+- **Human**: "안녕하세요"
+
+> **주의**: 여기서 사용되는 System 프롬프트는 **INFO_SYSTEM_PROMPT(1781자)가 아닌 별도의 짧은 프롬프트(69자)**.
+> 일반 대화에는 Tool 선택 규칙이 필요 없으므로 경량 프롬프트 사용.
+
+### FM 출력 (<- Gemini)
 ```
 안녕하세요! 무엇을 도와드릴까요? 혹시 물류 장비 관리에 대해 궁금한 점이 있으신가요?
 ```
 
----
-
-## State 변화 요약
-
-| 단계 | intent | messages 수 | final_answer |
-|------|--------|------------|--------------|
-| 초기 | `""` | 0 | `""` |
-| IntentAgent 후 | `"general_chat"` | 0 | `""` |
-| ResponseAgent 후 | `"general_chat"` | 0 | `"안녕하세요! ..."` |
-
-**messages가 끝까지 비어있음**: InfoAgent/ToolNode를 거치지 않았으므로 AIMessage, ToolMessage가 생성되지 않음.
+> **포인트**: FM이 "물류 관련 질문을 유도하세요" 지시에 따라 물류 관련 질문을 유도하는 답변 생성.
 
 ---
 
-## 전체 경로 비교
+## FM 호출 요약
+
+| 단계 | FM 역할 | System 프롬프트 | 입력 | 출력 |
+|------|---------|----------------|------|------|
+| IntentAgent | 의도 분류 | INTENT_SYSTEM_PROMPT (984자) | "안녕하세요" | `general_chat` |
+| ResponseAgent | 일반 대화 응답 | 일반대화 프롬프트 (69자) | "안녕하세요" | 인사 + 물류 유도 |
+
+**총 FM 호출: 2회** (InfoAgent 미경유 -> 최소 호출)
+
+---
+
+## 경로 비교
 
 ```
-[일반 대화 — 2단계]
-IntentAgent → ResponseAgent(경로A)
+일반 대화 (general_chat):
+  IntentAgent → ResponseAgent                    ← FM 2회
 
-[정보 조회 — 4~5단계]
-IntentAgent → InfoAgent → ToolNode → InfoAgent → ResponseAgent(경로B)
+정보 조회 (그 외 5개 의도):
+  IntentAgent → InfoAgent → ToolNode → InfoAgent → ResponseAgent   ← FM 3회+
 ```
-
-| 항목 | 일반 대화 | 정보 조회 |
-|------|----------|----------|
-| LLM 호출 | 2회 (의도분석 + 대화) | 3회 (의도분석 + Tool선택 + 결과정리) |
-| SQL 실행 | 0회 | 1회 이상 |
-| messages 사용 | 안 함 | AIMessage, ToolMessage 누적 |
-| 평균 응답 시간 | ~1초 | ~3초 |
 
 ---
 
 ## 학습 포인트
 
-1. **조건부 라우팅**: `route_intent` 함수 하나로 에이전트 흐름이 분기. LangGraph의 `add_conditional_edges`가 StateGraph의 핵심 기능.
-2. **불필요한 처리 스킵**: 일반 대화에 SQL Tool을 호출하면 비용 + 지연만 발생. intent 기반 분기로 효율적인 리소스 사용.
-3. **LLM 분리**: Tool 바인딩 LLM과 순수 대화 LLM을 분리하여, 각 경로에 최적화된 동작 보장.
-4. **도메인 유도**: 일반 대화에서도 "물류 장비 관련 질문을 유도"하여 시스템의 핵심 기능으로 자연스럽게 안내.
+1. **최단 경로**: `general_chat`은 유일하게 InfoAgent를 건너뛰는 의도. FM 호출 2회로 응답 생성. 이는 불필요한 Tool 호출을 방지.
+2. **다른 System 프롬프트 사용**: ResponseAgent의 일반대화 FM은 INFO_SYSTEM_PROMPT(1781자)가 아닌 69자짜리 경량 프롬프트 사용. Tool 정보가 불필요하므로 토큰 절약.
+3. **물류 유도 전략**: "물류와 무관한 질문에는 간단히 답하고, 물류 관련 질문을 유도하세요"라는 프롬프트가 사용자를 시스템의 핵심 도메인으로 이끔.
+4. **temperature 차이**: 일반대화 FM은 `temperature=0.7` (창의적), 다른 FM 호출은 `temperature=0` (결정적). 대화는 자연스럽게, 데이터 조회는 정확하게.

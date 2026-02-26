@@ -1,99 +1,83 @@
-# 예시 7: Lot 의미 모호성 해소 (lot_query — Disambiguation)
+# 예시 7: Lot 의미 모호성 해소 — 두 Tool 동시 호출 패턴
 
-> **학습 목표**: "설비에 Lot 뭐 있어?"라는 모호한 질문을 LLM이 **물리적 위치**와 **스케줄**로 구분하여 2개 Tool을 동시 호출하는 패턴. DB 조회 기반 AI에서 가장 빈번한 실무 문제인 **의미 모호성 해소(Semantic Disambiguation)** 를 다룬다.
+> **학습 목표**: "설비에 Lot 뭐 있어?"라는 **모호한 질문**에서 FM이
+> 물리적 위치(`get_lots_on_equipment`)와 스케줄(`get_lots_scheduled_for_equipment`) 두 Tool을 **동시에** 호출하는 패턴.
+> 같은 자연어가 서로 다른 SQL로 매핑되어야 하는 의미 모호성을 FM이 해소하는 과정을 추적한다.
 
 ---
 
-## 사용자 입력
+## 입력
 
 ```
 CVR-L1-TFT-01에 Lot 뭐 있어?
 ```
 
-## 왜 이 질문이 모호한가?
-
-"설비에 Lot 뭐 있어?"는 **최소 2가지 의미**로 해석 가능:
-
-| 해석 | SQL 매핑 | 의미 |
-|------|----------|------|
-| (A) 물리적 위치 | `lot.current_equipment_id = 'CVR-L1-TFT-01'` | 지금 설비 위에 물리적으로 있는 Lot |
-| (B) 생산 스케줄 | `lot_schedule.equipment_id = 'CVR-L1-TFT-01'` | 앞으로 이 설비에서 처리 예정인 Lot |
-
-**사람은 맥락으로 구분하지만, LLM은 명시적 가이드 없이는 하나만 선택하거나 혼동한다.**
+> **모호성**: "Lot 뭐 있어?" = 물리적으로 있는 Lot? 스케줄된 Lot? 둘 다?
 
 ---
 
-## 에이전트 처리 흐름
+## Step 1: IntentAgent (의도분석)
 
+### 🔷 FM 입력 (→ Gemini gemini-2.0-flash)
+- **System**: INTENT_SYSTEM_PROMPT (의도 6개 + JSON형식 + 매핑규칙, 984자)
+- **Human**:
 ```
-사용자: "CVR-L1-TFT-01에 Lot 뭐 있어?"
-  │
-  ▼
-[Step 1] IntentAgent
-  │  intent: "lot_query"
-  │  detail: {"equipment_id": "CVR-L1-TFT-01", "lot_id": ""}
-  │  reasoning: "특정 설비의 Lot 조회 요청"
-  │
-  ▼  intent ≠ "general_chat" → InfoAgent로
-[Step 2] InfoAgent ─── ⚡ 핵심: 2개 Tool 동시 호출
-  │  LLM 판단: 모호한 질문 → 두 Tool 모두 필요
-  │  tool_calls: [
-  │    get_lots_on_equipment({"equipment_id": "CVR-L1-TFT-01"}),
-  │    get_lots_scheduled_for_equipment({"equipment_id": "CVR-L1-TFT-01"})
-  │  ]
-  │
-  ▼  tool_calls 존재 → ToolNode로
-[Step 2.5] ToolNode ─── 2개 SQL 병렬 실행
-  │  Tool 1: get_lots_on_equipment → 물리적 위치 Lot 2건
-  │  Tool 2: get_lots_scheduled_for_equipment → 스케줄 Lot 6건
-  │
-  ▼  ToolNode → InfoAgent 재진입
-[Step 2 재진입] InfoAgent ─── 결과 구분하여 응답 생성
-  │  📍 물리적으로 있는 Lot / 📅 스케줄된 Lot 구분
-  │  ⚡ 이동 중(current ≠ scheduled) Lot 별도 표시
-  │
-  ▼
-[Step 3] ResponseAgent → final_answer
+CVR-L1-TFT-01에 Lot 뭐 있어?
 ```
+
+### 🔶 FM 출력 (← Gemini)
+```json
+{
+  "intent": "lot_query",
+  "detail": {
+    "equipment_type": "CONVEYOR",
+    "line": "L1",
+    "zone": "TFT",
+    "equipment_id": "CVR-L1-TFT-01",
+    "lot_id": "",
+    "hours": 0,
+    "keyword": ""
+  },
+  "reasoning": "특정 장비에 Lot이 있는지 확인하는 질문이므로 lot_query 의도이며, 장비 ID를 통해 장비 유형, 라인, 구간을 파악할 수 있음"
+}
+```
+
+> **포인트**: FM이 "Lot 뭐 있어?"를 `lot_query`로 분류하고, 장비 ID에서 유형/라인/구간을 역파싱.
+> `keyword`가 비어있음 → "현재" 또는 "예정" 등 명시적 표현이 없으므로 **모호한 질문**.
 
 ---
 
-## 핵심 설계 포인트
+## Step 2: InfoAgent (정보조회, 첫 호출)
 
-### 1. 프롬프트 기반 모호성 해소
-
-`INFO_SYSTEM_PROMPT`에 명시적 disambiguation 규칙:
-
+### 🔷 FM 입력 (→ Gemini gemini-2.0-flash, 첫 호출)
+- **System**: INFO_SYSTEM_PROMPT (도구 10개 + **모호성 해소 규칙**, 1781자)
+- **Human**:
 ```
-## ⚠ 의미 모호성 해소 (Disambiguation) 규칙
+사용자 질문: CVR-L1-TFT-01에 Lot 뭐 있어?
+의도: lot_query
+상세: {"equipment_type": "CONVEYOR", "line": "L1", "zone": "TFT", "equipment_id": "CVR-L1-TFT-01", "lot_id": "", "hours": 0, "keyword": ""}
 
-### "설비에 있는 Lot" 질문 시 — 반드시 2가지 의미를 구분:
-| 사용자 표현 | 의미 | 사용할 Tool |
-|---|---|---|
-| "설비에 지금 있는 Lot" | 물리적 현재 위치 | get_lots_on_equipment |
-| "설비에 예정된 Lot" | 스케줄 | get_lots_scheduled_for_equipment |
-| "설비 Lot 알려줘" (모호) | **두 Tool 모두 호출** | 둘 다 |
+위 의도에 맞는 도구를 호출하여 정보를 조회하세요.
 ```
 
-**포인트**: LLM에게 "모호하면 둘 다 호출하라"는 명시적 fallback 규칙을 줌.
-코드 변경 없이 프롬프트만으로 disambiguation을 구현하는 패턴.
+> **핵심**: System 프롬프트에 아래 규칙이 있음:
+> ```
+> | "설비 Lot 알려줘" (모호) | 모호함 → 두 Tool 모두 호출 |
+> ```
+> FM이 이 규칙 + `keyword: ""`(비어있음)을 보고 모호한 질문으로 판단.
 
-### 2. Tool 함수 docstring으로 의미 구분 강화
+### 🔶 FM 출력 (← Gemini) → **Tool 2개 동시 호출**
+- `get_lots_on_equipment({'equipment_id': 'CVR-L1-TFT-01'})`
+- `get_lots_scheduled_for_equipment({'equipment_id': 'CVR-L1-TFT-01'})`
 
-```python
-@tool
-def get_lots_on_equipment(equipment_id: str) -> str:
-    """설비에 현재 물리적으로 위치한 Lot 조회.
-    ⚠ '설비의 Lot'이라는 질문에서 '현재 물리적으로 있는 Lot'을 의미할 때 사용.
-    스케줄(예정)된 Lot을 보려면 get_lots_scheduled_for_equipment를 사용하세요."""
-```
+> **핵심**: FM이 **2개 Tool을 동시에** 호출 (Gemini Function Calling의 parallel tool calls).
+> 하나의 사용자 질문이 **2개의 서로 다른 SQL**로 매핑됨.
 
-**포인트**: docstring에 "언제 이 Tool을 쓰고, 언제 다른 Tool을 써야 하는지"를 명시.
-Gemini Function Calling은 docstring을 Tool 설명으로 사용하므로, 여기에 disambiguation 힌트를 넣는 것이 효과적.
+---
 
-### 3. 실행된 SQL — 같은 테이블, 다른 WHERE
+## Step 2.5: ToolNode (SQL 실행 — 2개 병렬)
 
-**Tool 1: get_lots_on_equipment** (물리적 위치)
+### Tool 1: get_lots_on_equipment (물리적 위치)
 ```sql
 SELECT l.lot_id, l.product_type, l.quantity, l.status,
        l.current_equipment_id, l.created_at, l.updated_at
@@ -102,44 +86,6 @@ WHERE l.current_equipment_id = 'CVR-L1-TFT-01'
   AND l.status IN ('IN_TRANSIT', 'IN_PROCESS')
 ```
 
-**Tool 2: get_lots_scheduled_for_equipment** (스케줄)
-```sql
-SELECT ls.lot_id, l.product_type, l.quantity, l.status,
-       l.current_equipment_id,
-       ls.equipment_id AS scheduled_equipment_id,
-       ls.scheduled_start, ls.scheduled_end,
-       ls.actual_start, ls.actual_end
-FROM lot_schedule ls
-JOIN lot l ON ls.lot_id = l.lot_id
-WHERE ls.equipment_id = 'CVR-L1-TFT-01'
-  AND ls.actual_end IS NULL
-```
-
-**핵심**: 같은 "설비의 Lot"이라는 질문이 **다른 테이블, 다른 WHERE 조건**으로 매핑됨.
-- Tool 1: `lot` 테이블의 `current_equipment_id` (물리적 위치)
-- Tool 2: `lot_schedule` 테이블의 `equipment_id` (계획)
-
-### 4. 이동 중 Lot 감지 패턴
-
-Tool 2 결과에서 LOT-005:
-```json
-{
-  "lot_id": "LOT-005",
-  "status": "IN_TRANSIT",
-  "current_equipment_id": "AGV-L1-CELL-01",     // ← 현재 AGV에 있음
-  "scheduled_equipment_id": "CVR-L1-TFT-01"     // ← 이 설비에 예정
-}
-```
-
-`current_equipment_id ≠ scheduled_equipment_id` → LLM이 "⚡ 이동 중" 표시.
-프롬프트 규칙: *"current_equipment_id ≠ schedule.equipment_id인 경우 이동 중 표시"*
-
----
-
-## Tool 결과 데이터
-
-### Tool 1: get_lots_on_equipment (물리적 위치 — 2건)
-
 ```json
 [
   {"lot_id": "LOT-020", "product_type": "OLED_B", "quantity": 206, "status": "IN_PROCESS", "current_equipment_id": "CVR-L1-TFT-01"},
@@ -147,62 +93,96 @@ Tool 2 결과에서 LOT-005:
 ]
 ```
 
-### Tool 2: get_lots_scheduled_for_equipment (스케줄 — 6건, 상위 3건)
+### Tool 2: get_lots_scheduled_for_equipment (스케줄)
+```sql
+SELECT ls.lot_id, l.product_type, l.quantity, l.status,
+       l.current_equipment_id, ls.equipment_id AS scheduled_equipment_id,
+       ls.scheduled_start, ls.scheduled_end, ls.actual_start, ls.actual_end
+FROM lot_schedule ls
+JOIN lot l ON ls.lot_id = l.lot_id
+WHERE ls.equipment_id = 'CVR-L1-TFT-01'
+  AND ls.actual_end IS NULL
+ORDER BY ls.scheduled_start
+```
 
 ```json
 [
-  {"lot_id": "LOT-020", "status": "IN_PROCESS", "current_equipment_id": "CVR-L1-TFT-01", "scheduled_equipment_id": "CVR-L1-TFT-01"},
-  {"lot_id": "LOT-023", "status": "IN_PROCESS", "current_equipment_id": "CVR-L1-TFT-01", "scheduled_equipment_id": "CVR-L1-TFT-01"},
-  {"lot_id": "LOT-005", "status": "IN_TRANSIT", "current_equipment_id": "AGV-L1-CELL-01", "scheduled_equipment_id": "CVR-L1-TFT-01"}
+  {"lot_id": "LOT-020", "status": "IN_PROCESS", "current_equipment_id": "CVR-L1-TFT-01", "scheduled_equipment_id": "CVR-L1-TFT-01", "scheduled_start": "2026-02-26 21:08:59"},
+  {"lot_id": "LOT-023", "status": "IN_PROCESS", "current_equipment_id": "CVR-L1-TFT-01", ...},
+  {"lot_id": "LOT-005", "status": "IN_TRANSIT", "current_equipment_id": "AGV-L1-CELL-01", "scheduled_equipment_id": "CVR-L1-TFT-01", ...},
+  {"lot_id": "LOT-018", "status": "SCHEDULED", "current_equipment_id": null, ...},
+  {"lot_id": "LOT-029", "status": "IN_TRANSIT", "current_equipment_id": "AGV-L3-PACK-02", ...},
+  {"lot_id": "LOT-009", "status": "SCHEDULED", "current_equipment_id": null, ...}
 ]
 ```
 
-**LOT-020, LOT-023**: 물리적 위치 = 스케줄 설비 (정상)
-**LOT-005**: 물리적 위치(AGV) ≠ 스케줄 설비(CVR) → 이동 중
+> **의미 모호성 실체**:
+> - Tool 1 결과: LOT-020, LOT-023 (물리적으로 설비에 있는 2건)
+> - Tool 2 결과: 6건 (스케줄된 Lot — 물리적 위치와 다른 것들 포함)
+> - LOT-005: `current=AGV-L1-CELL-01`(이동 중) + `scheduled=CVR-L1-TFT-01`(목적지) → **⚡ 이동 중**
+> - LOT-018: `current=null`(미배정) + `scheduled=CVR-L1-TFT-01` → **대기 중**
 
 ---
 
-## 최종 응답 (final_answer)
+## Step 2 재진입: InfoAgent (Tool 결과 수신)
 
+### 🔷 FM 입력 (→ Gemini gemini-2.0-flash, 재진입)
+- **System**: INFO_SYSTEM_PROMPT (도구 10개 + 모호성 해소 규칙, 1781자)
+- **Messages**: 메시지 히스토리 3건 포함
+  - `AIMessage`: (tool_calls: 2개)
+  - `ToolMessage` 1: [LOT-020, LOT-023] (물리적 위치)
+  - `ToolMessage` 2: [LOT-020, LOT-023, LOT-005, LOT-018, LOT-029, LOT-009] (스케줄)
+
+> **핵심**: FM이 2개 Tool의 결과를 **동시에** 받고, 프롬프트 규칙에 따라 구분하여 응답.
+
+### 🔶 FM 출력 (← Gemini) → 텍스트 응답
 ```
 📍 현재 CVR-L1-TFT-01 설비에 물리적으로 위치한 Lot:
-
-| Lot ID | 제품 유형 | 수량 | 상태 |
-|---|---|---|---|
-| LOT-020 | OLED_B | 206 | IN_PROCESS |
-| LOT-023 | OLED_A | 289 | IN_PROCESS |
+| Lot ID  | 제품 유형 | 수량 | 상태       |
+|---------|-----------|------|------------|
+| LOT-020 | OLED_B    | 206  | IN_PROCESS |
+| LOT-023 | OLED_A    | 289  | IN_PROCESS |
 
 📅 CVR-L1-TFT-01 설비에 예정된 Lot:
-
-| Lot ID | 제품 유형 | 수량 | 상태 | 현재 위치 |
-|---|---|---|---|---|
-| LOT-020 | OLED_B | 206 | IN_PROCESS | CVR-L1-TFT-01 |
-| LOT-023 | OLED_A | 289 | IN_PROCESS | CVR-L1-TFT-01 |
-| LOT-005 | LCD_C | 137 | IN_TRANSIT | ⚡ 이동 중 (AGV-L1-CELL-01) |
-| LOT-018 | OLED_B | 289 | SCHEDULED |  |
-| LOT-029 | LCD_C | 349 | IN_TRANSIT | ⚡ 이동 중 (AGV-L3-PACK-02) |
-| LOT-009 | OLED_B | 196 | SCHEDULED |  |
+| Lot ID  | 제품 유형 | 수량 | 상태                         | 스케줄 시작          |
+|---------|-----------|------|------------------------------|----------------------|
+| LOT-020 | OLED_B    | 206  | IN_PROCESS                   | 2026-02-26 21:08:59  |
+| LOT-023 | OLED_A    | 289  | IN_PROCESS                   | 2026-02-26 22:08:59  |
+| LOT-005 | LCD_C     | 137  | ⚡ 이동 중 (AGV-L1-CELL-01)  | 2026-02-26 23:08:59  |
+| LOT-018 | OLED_B    | 289  | SCHEDULED                    | 2026-02-27 00:08:59  |
+| LOT-029 | LCD_C     | 349  | ⚡ 이동 중 (AGV-L3-PACK-02)  | 2026-02-27 04:08:59  |
+| LOT-009 | OLED_B    | 196  | SCHEDULED                    | 2026-02-27 06:08:59  |
 ```
+
+> **포인트**: FM이 프롬프트 규칙 적용:
+> 1. 📍/📅 아이콘으로 물리적 위치 vs 스케줄 **구분 표시**
+> 2. `current_equipment_id ≠ scheduled_equipment_id` → **"⚡ 이동 중"** 표시
+> 3. `current=null` → 상태만 표시 (SCHEDULED)
 
 ---
 
-## State 변화 요약
+## Step 3: ResponseAgent (응답생성)
 
-| 단계 | intent | messages | final_answer |
-|------|--------|----------|--------------|
-| 초기 | `""` | `[]` | `""` |
-| IntentAgent 후 | `"lot_query"` | `[]` | `""` |
-| InfoAgent 1차 후 | `"lot_query"` | `[AIMessage(tool_calls×2)]` | `""` |
-| ToolNode 후 | `"lot_query"` | `[AIMessage, ToolMessage×2]` | `""` |
-| InfoAgent 2차 후 | `"lot_query"` | `[AI, Tool×2, AIMessage]` | `""` |
-| ResponseAgent 후 | `"lot_query"` | `[AI, Tool×2, AIMessage]` | `"📍 현재..."` |
+최종 응답: 위 📍/📅 구분 표 그대로 추출.
+
+---
+
+## FM 호출 요약
+
+| 단계 | FM 역할 | 핵심 판단 |
+|------|---------|----------|
+| IntentAgent | 의도 분류 | "Lot 뭐 있어?" → `lot_query`, keyword 비어있음 |
+| InfoAgent 1차 | **모호성 해소** | keyword 없음 + 모호성 규칙 → **2개 Tool 동시 호출** |
+| InfoAgent 재진입 | 구분 응답 | 2개 Tool 결과 → 📍물리적 + 📅스케줄 **분리 표시** |
+
+**총 FM 호출: 3회** — InfoAgent 1차에서 2개 Tool 동시 호출이 핵심
 
 ---
 
 ## 학습 포인트
 
-1. **의미 모호성 해소 = 프롬프트 + Tool docstring**: 코드 변경(조건 분기, 되묻기 로직) 없이 프롬프트 규칙만으로 disambiguation 구현. LLM이 스스로 판단하여 2개 Tool을 동시 호출.
-2. **Parallel Tool Calls**: Gemini Function Calling이 1회 호출에서 2개 Tool을 동시 요청. LangGraph의 ToolNode가 자동으로 병렬 실행.
-3. **같은 자연어 → 다른 SQL**: "설비의 Lot"이라는 동일한 자연어가 `lot.current_equipment_id` (물리) vs `lot_schedule.equipment_id` (계획)으로 다르게 매핑됨. 이것이 DB 기반 AI 시스템의 핵심 난제.
-4. **current ≠ scheduled 감지**: Lot이 이동 중일 때 물리적 위치와 계획 설비가 다른 것을 LLM이 감지하고 별도 표시. 비즈니스 용어 사전이 이를 가능하게 함.
-5. **실무 적용**: 이 패턴은 Lot뿐 아니라 "직원의 부서" (현재 소속 vs 발령 예정), "제품의 창고" (현재 위치 vs 출하 예정) 등 모든 DB 기반 AI에서 반복되는 문제.
+1. **의미 모호성 해소**: "Lot 뭐 있어?"는 물리적 위치와 스케줄 두 가지 의미. FM이 System 프롬프트의 모호성 해소 규칙을 적용하여 2개 Tool을 동시 호출.
+2. **Parallel Tool Calls**: Gemini Function Calling은 1회 호출에서 여러 Tool을 동시에 호출할 수 있음. 이는 순차 호출 대비 지연시간 절약.
+3. **같은 자연어, 다른 SQL**: 하나의 "Lot 뭐 있어?" 질문이 `lot.current_equipment_id = ?` 와 `lot_schedule.equipment_id = ?` 두 개의 다른 SQL로 매핑.
+4. **⚡ 이동 중 표시**: `current_equipment_id ≠ scheduled_equipment_id`인 경우를 FM이 감지하고 "이동 중" 마커를 추가. 프롬프트 규칙: "current_equipment_id ≠ schedule.equipment_id인 경우 ⚡ 이동 중 표시".
+5. **모호 vs 명확 비교**: 예시 8에서 "예정된 Lot 보여줘"처럼 명확한 질문은 단일 Tool만 호출됨.

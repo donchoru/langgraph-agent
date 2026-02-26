@@ -38,10 +38,19 @@ def info_node(state: AgentState) -> dict:
     if reentry:
         trimmed = prepare_messages(list(messages))
         llm_messages = [SystemMessage(content=INFO_SYSTEM_PROMPT)] + trimmed
-        if len(trimmed) < len(messages):
-            trace.append(f"### LLM 호출 (원본 {len(messages)}건 → 트리밍 {len(trimmed)}건)")
-        else:
-            trace.append(f"### LLM 호출 (메시지 히스토리 {len(messages)}건 포함)")
+        trim_note = (f"원본 {len(messages)}건 → 트리밍 {len(trimmed)}건"
+                     if len(trimmed) < len(messages)
+                     else f"메시지 히스토리 {len(messages)}건 포함")
+        trace += [
+            f"### 🔷 FM 입력 (→ Gemini {GEMINI_MODEL}, 재진입)",
+            f"- **System**: INFO_SYSTEM_PROMPT (도구 10개 + 모호성 해소 규칙, {len(INFO_SYSTEM_PROMPT)}자)",
+            f"- **Messages**: {trim_note}",
+        ]
+        # 메시지 요약 (마지막 3건)
+        for m in trimmed[-3:]:
+            role = type(m).__name__
+            content_preview = str(getattr(m, 'content', ''))[:200]
+            trace.append(f"  - `{role}`: {content_preview}")
     else:
         # 대화 이력이 있으면 문맥 포함
         history = state.get("conversation_history", [])
@@ -63,7 +72,14 @@ def info_node(state: AgentState) -> dict:
             SystemMessage(content=INFO_SYSTEM_PROMPT),
             HumanMessage(content=prompt),
         ]
-        trace.append(f"### LLM 호출 (첫 호출)")
+        trace += [
+            f"### 🔷 FM 입력 (→ Gemini {GEMINI_MODEL}, 첫 호출)",
+            f"- **System**: INFO_SYSTEM_PROMPT (도구 10개 + 모호성 해소 규칙, {len(INFO_SYSTEM_PROMPT)}자)",
+            f"- **Human**:",
+            f"```",
+            f"{prompt}",
+            f"```",
+        ]
 
     try:
         response = llm.invoke(llm_messages)
@@ -77,14 +93,20 @@ def info_node(state: AgentState) -> dict:
         }
 
     if response.tool_calls:
-        trace.append("### LLM 출력 → Tool 호출 요청")
+        trace += [
+            f"### 🔶 FM 출력 (← Gemini) → Tool 호출 요청",
+        ]
         for tc in response.tool_calls:
             trace.append(f"- `{tc['name']}({tc['args']})`")
         trace.append(f"### 다음: ToolNode로 이동")
     else:
-        trace.append(f"### LLM 출력 → 텍스트 응답")
-        trace.append(f"```\n{response.content[:500]}\n```")
-        trace.append(f"### 다음: ResponseAgent로 이동")
+        trace += [
+            f"### 🔶 FM 출력 (← Gemini) → 텍스트 응답",
+            f"```",
+            f"{response.content[:500]}",
+            f"```",
+            f"### 다음: ResponseAgent로 이동",
+        ]
 
     # State AFTER 스냅샷
     updated = dict(state)
@@ -114,17 +136,26 @@ def respond_node(state: AgentState) -> dict:
 
     if intent == "general_chat":
         # 일반 대화 — 간단히 응답
+        chat_system = "당신은 친절한 물류 장비 관리 시스템 어시스턴트입니다. 물류와 무관한 질문에는 간단히 답하고, 물류 관련 질문을 유도하세요."
         simple_llm = ChatGoogleGenerativeAI(
             model=GEMINI_MODEL,
             google_api_key=GEMINI_API_KEY,
             temperature=0.7,
         )
         response = simple_llm.invoke([
-            SystemMessage(content="당신은 친절한 물류 장비 관리 시스템 어시스턴트입니다. 물류와 무관한 질문에는 간단히 답하고, 물류 관련 질문을 유도하세요."),
+            SystemMessage(content=chat_system),
             HumanMessage(content=user_input),
         ])
         answer = response.content
-        trace.append(f"### 처리: 일반 대화 LLM 직접 호출")
+        trace += [
+            f"### 🔷 FM 입력 (→ Gemini {GEMINI_MODEL}, 일반대화)",
+            f"- **System**: \"{chat_system[:80]}...\" ({len(chat_system)}자)",
+            f"- **Human**: \"{user_input}\"",
+            f"### 🔶 FM 출력 (← Gemini)",
+            f"```",
+            f"{answer}",
+            f"```",
+        ]
     else:
         # Tool 결과가 포함된 메시지에서 마지막 AI 응답 추출
         last_ai = None
@@ -137,7 +168,7 @@ def respond_node(state: AgentState) -> dict:
             answer = last_ai.content
         else:
             answer = "조회 결과를 처리하지 못했습니다. 다시 시도해주세요."
-        trace.append(f"### 처리: 메시지 히스토리에서 최종 AI 응답 추출")
+        trace.append(f"### 처리: InfoAgent 재진입에서 생성된 최종 AI 응답 추출")
 
     trace += [
         f"### 최종 응답 (final_answer)",
