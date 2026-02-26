@@ -3,6 +3,7 @@ from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 from agents.state import AgentState, dump_state
 from agents.prompts import INFO_SYSTEM_PROMPT
+from agents.message_trimmer import prepare_messages
 from tools.sql_tools import ALL_TOOLS
 from config import GEMINI_API_KEY, GEMINI_MODEL
 
@@ -33,10 +34,14 @@ def info_node(state: AgentState) -> dict:
     ]
     trace += dump_state(state)
 
-    # 이미 메시지가 있으면 (tool 결과 포함) 전체 히스토리로 호출
+    # 이미 메시지가 있으면 (tool 결과 포함) 트리밍 후 히스토리로 호출
     if reentry:
-        llm_messages = [SystemMessage(content=INFO_SYSTEM_PROMPT)] + list(messages)
-        trace.append(f"### LLM 호출 (메시지 히스토리 {len(messages)}건 포함)")
+        trimmed = prepare_messages(list(messages))
+        llm_messages = [SystemMessage(content=INFO_SYSTEM_PROMPT)] + trimmed
+        if len(trimmed) < len(messages):
+            trace.append(f"### LLM 호출 (원본 {len(messages)}건 → 트리밍 {len(trimmed)}건)")
+        else:
+            trace.append(f"### LLM 호출 (메시지 히스토리 {len(messages)}건 포함)")
     else:
         prompt = (
             f"사용자 질문: {user_input}\n"
