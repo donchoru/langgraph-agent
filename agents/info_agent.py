@@ -1,7 +1,7 @@
 """정보조회 Agent — 의도 기반으로 Tool 호출 후 응답 생성."""
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
-from agents.state import AgentState
+from agents.state import AgentState, dump_state
 from agents.prompts import INFO_SYSTEM_PROMPT
 from tools.sql_tools import ALL_TOOLS
 from config import GEMINI_API_KEY, GEMINI_MODEL
@@ -24,16 +24,19 @@ def info_node(state: AgentState) -> dict:
     user_input = state["user_input"]
     messages = state.get("messages", [])
 
+    reentry = bool(messages)
+    step_label = "InfoAgent 재진입 (Tool 결과 수신)" if reentry else "InfoAgent (정보조회)"
+
     trace = [
-        f"\n---\n## Step 2: InfoAgent (정보조회)",
-        f"### INPUT",
-        f"- intent: `{intent}`",
-        f"- detail: `{intent_detail}`",
+        f"\n---\n## Step 2: {step_label}",
+        f"### State BEFORE",
     ]
+    trace += dump_state(state)
 
     # 이미 메시지가 있으면 (tool 결과 포함) 전체 히스토리로 호출
-    if messages:
+    if reentry:
         llm_messages = [SystemMessage(content=INFO_SYSTEM_PROMPT)] + list(messages)
+        trace.append(f"### LLM 호출 (메시지 히스토리 {len(messages)}건 포함)")
     else:
         prompt = (
             f"사용자 질문: {user_input}\n"
@@ -45,6 +48,7 @@ def info_node(state: AgentState) -> dict:
             SystemMessage(content=INFO_SYSTEM_PROMPT),
             HumanMessage(content=prompt),
         ]
+        trace.append(f"### LLM 호출 (첫 호출)")
 
     try:
         response = llm.invoke(llm_messages)
@@ -58,9 +62,21 @@ def info_node(state: AgentState) -> dict:
         }
 
     if response.tool_calls:
-        trace.append("### TOOL CALLS")
+        trace.append("### LLM 출력 → Tool 호출 요청")
         for tc in response.tool_calls:
             trace.append(f"- `{tc['name']}({tc['args']})`")
+        trace.append(f"### 다음: ToolNode로 이동")
+    else:
+        trace.append(f"### LLM 출력 → 텍스트 응답")
+        trace.append(f"```\n{response.content[:500]}\n```")
+        trace.append(f"### 다음: ResponseAgent로 이동")
+
+    # State AFTER 스냅샷
+    updated = dict(state)
+    updated_msgs = list(state.get("messages", [])) + [response]
+    updated["messages"] = updated_msgs
+    trace += [f"### State AFTER"]
+    trace += dump_state(updated)
 
     return {
         "messages": [response],
@@ -74,6 +90,13 @@ def respond_node(state: AgentState) -> dict:
     messages = state["messages"]
     user_input = state["user_input"]
 
+    step_num = "2" if intent == "general_chat" else "3"
+    trace = [
+        f"\n---\n## Step {step_num}: ResponseAgent (응답생성)",
+        f"### State BEFORE",
+    ]
+    trace += dump_state(state)
+
     if intent == "general_chat":
         # 일반 대화 — 간단히 응답
         simple_llm = ChatGoogleGenerativeAI(
@@ -86,12 +109,7 @@ def respond_node(state: AgentState) -> dict:
             HumanMessage(content=user_input),
         ])
         answer = response.content
-
-        trace = [
-            f"\n---\n## Step 2: ResponseAgent (일반 대화)",
-            f"### OUTPUT",
-            f"```\n{answer}\n```",
-        ]
+        trace.append(f"### 처리: 일반 대화 LLM 직접 호출")
     else:
         # Tool 결과가 포함된 메시지에서 마지막 AI 응답 추출
         last_ai = None
@@ -104,12 +122,18 @@ def respond_node(state: AgentState) -> dict:
             answer = last_ai.content
         else:
             answer = "조회 결과를 처리하지 못했습니다. 다시 시도해주세요."
+        trace.append(f"### 처리: 메시지 히스토리에서 최종 AI 응답 추출")
 
-        trace = [
-            f"\n---\n## Step 3: ResponseAgent (응답생성)",
-            f"### OUTPUT",
-            f"```\n{answer}\n```",
-        ]
+    trace += [
+        f"### 최종 응답 (final_answer)",
+        f"```\n{answer}\n```",
+    ]
+
+    # State AFTER
+    updated = dict(state)
+    updated["final_answer"] = answer
+    trace += [f"### State AFTER"]
+    trace += dump_state(updated)
 
     return {
         "final_answer": answer,
