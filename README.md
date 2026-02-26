@@ -19,6 +19,7 @@ LangGraph 기반 **2단계 멀티 에이전트 파이프라인**으로 구현한
 - [DB 스키마](#db-스키마)
 - [SQL Tools (7개)](#sql-tools-7개)
 - [테스트 질문 예시](#테스트-질문-예시)
+- [FM (Foundation Model) I/O 트레이싱](#fm-foundation-model-io-트레이싱)
 - [기술 스택](#기술-스택)
 
 ---
@@ -41,7 +42,8 @@ graph TD
 - **StateGraph 패턴**: LangGraph의 `StateGraph`를 사용하여 에이전트 간 상태를 공유
 - **조건부 라우팅**: 의도 분류 결과에 따라 다른 노드로 분기
 - **Tool 루프**: InfoAgent ↔ ToolNode 사이에서 Tool 호출과 결과 처리를 반복
-- **트레이스 누적**: 각 에이전트가 `trace_log` 리스트에 자신의 입출력을 누적 기록
+- **FM I/O 트레이싱**: 각 에이전트가 FM(Gemini)에 전달하는 입력(🔷)과 출력(🔶)을 `trace_log`에 기록
+- **멀티턴 문맥**: `conversation_history`로 대화 이력을 FM 입력에 주입하여 대명사 해소/토픽 전환 처리
 
 ---
 
@@ -58,9 +60,11 @@ graph TD
 | `user_input` | 사용자 원본 질문 (예: "L1 컨베이어 부하율 알려줘") |
 
 #### 처리 과정
-1. Gemini LLM에 `INTENT_SYSTEM_PROMPT` + 사용자 질문 전달
-2. LLM이 **JSON 형식**으로 의도 분류 결과 반환
+1. `🔷 FM 입력`: `INTENT_SYSTEM_PROMPT`(984자) + 사용자 질문을 Gemini에 전달
+   - 멀티턴 시 `conversation_history`를 `_build_context()`로 Human 메시지에 주입
+2. `🔶 FM 출력`: Gemini가 **JSON 형식**으로 의도 분류 결과 반환
 3. JSON 파싱 실패 시 `general_chat`으로 폴백
+4. 트레이스에 FM 입력(System+Human 내용) / 출력(raw JSON) 기록
 
 #### 출력
 | 필드 | 설명 | 예시 |
@@ -112,11 +116,12 @@ graph TD
 | `messages` | 이전 메시지 히스토리 (Tool 결과 포함) |
 
 #### 처리 과정
-1. **첫 호출**: 시스템 프롬프트 + 사용자 질문을 Tool 바인딩된 LLM에 전달
-2. LLM이 적절한 Tool 호출을 결정 (예: `get_overloaded_equipment()`)
+1. **첫 호출** `🔷 FM 입력`: `INFO_SYSTEM_PROMPT`(1781자) + 사용자 질문/의도/상세를 Tool 바인딩된 Gemini에 전달
+   - 멀티턴 시 `conversation_history` 요약을 Human 메시지 선두에 주입
+2. `🔶 FM 출력`: Gemini가 적절한 Tool 호출을 결정 (예: `get_overloaded_equipment()`)
 3. `tool_calls`가 있으면 → **ToolNode로 이동**
-4. **재진입 (Tool 결과 수신 후)**: 전체 메시지 히스토리(Tool 결과 포함)를 LLM에 전달
-5. LLM이 Tool 결과를 바탕으로 최종 텍스트 응답 생성
+4. **재진입** `🔷 FM 입력`: System 프롬프트 + 전체 메시지 히스토리(AI+ToolMessage)를 Gemini에 전달
+5. `🔶 FM 출력`: Tool 결과를 바탕으로 최종 텍스트 응답(마크다운 표 등) 생성
 
 #### 출력
 | 필드 | 설명 |
@@ -174,8 +179,8 @@ graph TD
 #### 입력 경로에 따른 처리
 
 **경로 A: 일반 대화 (`general_chat`)**
-1. Tool 바인딩 없는 별도 LLM으로 간단한 대화 응답 생성
-2. 물류와 무관한 질문에는 간단히 답하고, 물류 관련 질문을 유도
+1. `🔷 FM 입력`: 경량 System 프롬프트(69자) + 사용자 질문을 별도 Gemini(temperature=0.7)에 전달
+2. `🔶 FM 출력`: 물류와 무관한 질문에는 간단히 답하고, 물류 관련 질문을 유도하는 응답 생성
 
 **경로 B: 정보조회 결과 정리**
 1. 메시지 히스토리에서 마지막 AI 응답(Tool 결과를 정리한 텍스트) 추출
@@ -279,42 +284,55 @@ class AgentState(TypedDict):
 ## 트레이스 로그
 
 실행할 때마다 `traces/trace_YYYYMMDD_HHMMSS.md` 파일이 자동 생성됩니다.
-에이전트 간 입출력과 Tool 호출 내역을 Markdown으로 확인할 수 있습니다.
+각 Step마다 **FM(Foundation Model)이 실제로 받는 입력과 출력**이 기록되어,
+에이전트 간 데이터 흐름과 LLM의 판단 과정을 Markdown으로 확인할 수 있습니다.
 
-### 트레이스 예시 — "과부하 장비 있어?"
+### 트레이스 예시 — "과부하 장비 있어?" (FM I/O 포함)
 
 ```markdown
-# Agent Trace Log
-- **시간**: 2026-02-26 15:30:01
-- **사용자 입력**: 과부하 장비 있어?
-- **최종 의도**: overload_check
-
----
 ## Step 1: IntentAgent (의도분석)
-### INPUT
-과부하 장비 있어?
-### OUTPUT
+### 🔷 FM 입력 (→ Gemini gemini-2.0-flash)
+- **System**: INTENT_SYSTEM_PROMPT (의도 6개 + JSON형식 + 매핑규칙, 984자)
+- **Human**:
+  과부하 장비 있어?
+
+### 🔶 FM 출력 (← Gemini)
+  {"intent": "overload_check", "detail": {...}, "reasoning": "과부하 장비 확인 요청"}
+
+### 파싱 결과
 - intent: `overload_check`
-- detail: `{"equipment_type":"","line":"","zone":"","equipment_id":"","hours":0,"keyword":""}`
-- reasoning: 과부하 장비 확인 요청
 
 ---
-## Step 2: InfoAgent (정보조회)
-### INPUT
-- intent: `overload_check`
-- detail: `{"equipment_type":"","line":"","zone":"","equipment_id":"","hours":0,"keyword":""}`
-### TOOL CALLS
+## Step 2: InfoAgent (정보조회, 첫 호출)
+### 🔷 FM 입력 (→ Gemini gemini-2.0-flash, 첫 호출)
+- **System**: INFO_SYSTEM_PROMPT (도구 10개 + 모호성 해소 규칙, 1781자)
+- **Human**:
+  사용자 질문: 과부하 장비 있어?
+  의도: overload_check
+  상세: {...}
+
+### 🔶 FM 출력 (← Gemini) → Tool 호출 요청
 - `get_overloaded_equipment({})`
 
 ---
+## Step 2.5: ToolNode (SQL 실행)
+- `get_overloaded_equipment({})` → [{장비데이터JSON}]
+
+---
+## Step 2 재진입: InfoAgent (Tool 결과 수신)
+### 🔷 FM 입력 (재진입)
+- **Messages**: [AIMessage(tool_calls), ToolMessage(결과)]
+
+### 🔶 FM 출력 (← Gemini) → 텍스트 응답
+  과부하 장비 목록입니다.
+  | 장비 ID | 유형 | 라인 | 부하율(%) | 상태 |
+  | CVR-L1-CELL-01 | CONVEYOR | L1 | 99.8 | ERROR |
+  | ...
+
+---
 ## Step 3: ResponseAgent (응답생성)
-### OUTPUT
-과부하 장비 목록입니다.
-| 장비 ID | 유형 | 라인 | 구간 | 부하율(%) | 상태 |
-|---------|------|------|------|-----------|------|
-| CVR-L1-CELL-01 | CONVEYOR | L1 | CELL | **99.8** | ERROR |
-| SHT-L3-CELL-01 | SHUTTLE | L3 | CELL | **99.3** | ERROR |
-| ... |
+### 최종 응답 (final_answer)
+  과부하 장비 목록입니다. ...
 ```
 
 ---
@@ -552,6 +570,70 @@ python -m db.seed
 python -m snapshots.db_dump
 python -m snapshots.traces_dump
 ```
+
+---
+
+## FM (Foundation Model) I/O 트레이싱
+
+이 프로젝트의 핵심 학습 포인트는 **FM(Foundation Model)이 각 단계에서 무엇을 입력받고 무엇을 출력하는지** 추적하는 것입니다.
+
+### FM 호출 표기법
+
+트레이스 로그와 `examples/` 파일에서 다음 표기를 사용합니다:
+
+| 표기 | 의미 |
+|------|------|
+| `🔷 FM 입력 (→ Gemini gemini-2.0-flash)` | FM에게 전달되는 입력 (System 프롬프트 + Human 메시지) |
+| `🔶 FM 출력 (← Gemini)` | FM이 반환하는 출력 (JSON, Tool 호출, 텍스트 응답) |
+
+### 단일 질문에서 FM 호출 횟수
+
+```
+"과부하 장비 있어?" → FM 3회 호출:
+
+  1️⃣ IntentAgent   — System(984자)  + Human("과부하 장비 있어?")      → JSON: overload_check
+  2️⃣ InfoAgent 1차 — System(1781자) + Human(질문+의도+상세)           → Tool: get_overloaded_equipment
+  3️⃣ InfoAgent 재진입 — System(1781자) + Messages(AI+ToolMessage)    → 텍스트: "과부하 장비 목록..."
+
+"안녕하세요" → FM 2회 호출 (최단경로):
+
+  1️⃣ IntentAgent    — System(984자) + Human("안녕하세요")             → JSON: general_chat
+  2️⃣ ResponseAgent  — System(69자)  + Human("안녕하세요")             → 텍스트: "안녕하세요! ..."
+```
+
+### FM에 전달되는 System 프롬프트 3종
+
+| 프롬프트 | 크기 | 사용 에이전트 | 역할 |
+|----------|------|---------------|------|
+| `INTENT_SYSTEM_PROMPT` | 984자 | IntentAgent | 의도 6개 분류 + JSON 출력 형식 + 장비유형 매핑 |
+| `INFO_SYSTEM_PROMPT` | 1781자 | InfoAgent | 도구 10개 선택 가이드 + 의미 모호성 해소 규칙 + 비즈니스 용어 사전 |
+| 일반대화 프롬프트 | 69자 | ResponseAgent | 물류 어시스턴트 역할 + 물류 질문 유도 |
+
+### FM의 핵심 판단 패턴
+
+| 패턴 | 예시 | FM의 판단 |
+|------|------|-----------|
+| **파라미터 추출** | "L1 컨베이어" → `{type: CONVEYOR, line: L1}` | System 프롬프트의 매핑 테이블 참조 |
+| **Tool 선택** | 같은 `load_rate_query`에서 `get_load_rates` vs `get_zone_summary` | 질문의 뉘앙스("구간별 요약") 판단 |
+| **의미 모호성 해소** | "Lot 뭐 있어?" → 2개 Tool 동시 호출 | 프롬프트의 disambiguation 규칙 적용 |
+| **대명사 해소** | "그럼 B설비는?" → 이전 턴의 질문 구조 복원 | conversation_history 문맥 읽기 |
+| **대량 데이터 변환** | 20건 JSON → 마크다운 표 | "표 형식 권장" 규칙 + FM의 포맷팅 능력 |
+
+### 예시별 FM I/O 학습 포인트
+
+| # | 예시 | FM 호출 | 핵심 FM I/O 패턴 |
+|---|------|---------|------------------|
+| 1 | [과부하 확인](examples/trace_overload_check.md) | 3회 | 기본 Tool Loop: 의도→Tool→응답 |
+| 2 | [부하율 조회](examples/trace_load_rate_query.md) | 3회 | 자연어 → 구조화 파라미터 변환 |
+| 3 | [구간별 요약](examples/trace_zone_summary.md) | 3회 | 같은 의도, FM이 다른 Tool 선택 |
+| 4 | [알림 이력](examples/trace_alert_check.md) | 3회 | 대량 데이터(20건) → 표 변환 |
+| 5 | [일반 대화](examples/trace_general_chat.md) | **2회** | 최단경로, 경량 프롬프트(69자) |
+| 6 | [원인 분석](examples/trace_cascading_analysis.md) | 3회 | 의도 vs Tool 불일치 (FM의 맥락 판단) |
+| 7 | [Lot 모호성](examples/trace_lot_disambiguation.md) | 3회 | **2개 Tool 동시 호출** (Parallel Function Calling) |
+| 8 | [Lot 명확](examples/trace_lot_specific_query.md) | 3회 | 단일 Tool (예시 7과 대비) |
+| 9 | [멀티턴 심화](examples/trace_multiturn_followup.md) | 9회(3턴) | history가 FM 입력에 누적 |
+| 10 | [토픽 전환](examples/trace_multiturn_topic_switch.md) | 6회(2턴) | history 있지만 FM이 독립 판단 |
+| 11 | [대명사 해소](examples/trace_multiturn_context_carry.md) | 6회(2턴) | "그럼 ~은?" → FM이 문맥 복원 |
 
 ---
 
