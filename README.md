@@ -342,10 +342,23 @@ langgraph-agent/
 │   ├── connection.py        #   SQLite 연결 유틸리티
 │   └── seed.py              #   샘플 데이터 생성기
 │
-├── traces/                  # 트레이스 로그 출력 디렉토리
+├── traces/                  # 트레이스 로그 출력 디렉토리 (gitignore)
 │   └── trace_*.md           #   실행별 에이전트 추적 기록
 │
-└── logistics.db             # SQLite DB (seed 실행 후 생성)
+├── snapshots/               # GitHub에서 볼 수 있는 데이터 스냅샷
+│   ├── db_dump.py           #   logistics.db → db_snapshot.json
+│   ├── db_snapshot.json     #   DB 전체 데이터 (장비 30, 부하율 720, 알림 250건)
+│   ├── traces_dump.py       #   traces/*.md → traces_snapshot.json
+│   └── traces_snapshot.json #   에이전트 실행 트레이스 전문 (13건)
+│
+├── examples/                # 트레이스 예시 (curated)
+│   ├── trace_overload_check.md
+│   ├── trace_load_rate_query.md
+│   ├── trace_alert_check.md
+│   ├── trace_zone_summary.md
+│   └── trace_general_chat.md
+│
+└── logistics.db             # SQLite DB — gitignore (seed 실행 후 생성)
 ```
 
 ---
@@ -475,6 +488,25 @@ alert_threshold (장비 유형별 독립)
 | "L2 구간별 부하율 요약" | `load_rate_query` | `get_zone_summary` |
 | "L3 장비 상태 어때?" | `equipment_status` | `get_equipment_status` |
 | "크레인 장비 목록" | `equipment_status` | `get_equipment_list` |
+
+---
+
+## 데이터 스냅샷
+
+`logistics.db`와 `traces/*.md`는 바이너리/gitignore라 GitHub에서 볼 수 없습니다.
+`snapshots/` 디렉토리에 JSON 덤프를 생성하여 GitHub에서 확인할 수 있습니다.
+
+| 스냅샷 파일 | 내용 | 재생성 명령 |
+|-------------|------|-------------|
+| `snapshots/db_snapshot.json` | DB 전체 데이터 (장비 30, 부하율 720, 임계값 6, 알림 250건) | `python -m snapshots.db_dump` |
+| `snapshots/traces_snapshot.json` | 에이전트 실행 트레이스 전문 (13건) | `python -m snapshots.traces_dump` |
+
+```bash
+# 데이터 변경 후 스냅샷 재생성
+python -m db.seed
+python -m snapshots.db_dump
+python -m snapshots.traces_dump
+```
 
 ---
 
