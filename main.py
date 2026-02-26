@@ -1,0 +1,83 @@
+"""대화형 실행 진입점 — LangGraph 멀티 에이전트 물류 장비 부하율 관리."""
+import sys
+from datetime import datetime
+from pathlib import Path
+
+from config import TRACES_DIR
+from graph.workflow import build_graph
+
+
+def save_trace(user_input: str, intent: str, trace_lines: list[str]) -> Path:
+    """트레이스 로그를 Markdown 파일로 저장."""
+    TRACES_DIR.mkdir(exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = TRACES_DIR / f"trace_{ts}.md"
+
+    header = [
+        "# Agent Trace Log",
+        f"- **시간**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"- **사용자 입력**: {user_input}",
+        f"- **최종 의도**: {intent}",
+        "",
+        "---",
+    ]
+
+    path.write_text("\n".join(header + trace_lines), encoding="utf-8")
+    return path
+
+
+def main():
+    print("=" * 60)
+    print("  물류 장비 부하율 관리 — LangGraph 멀티 에이전트")
+    print("  종료: 'quit' 또는 'q' 입력")
+    print("=" * 60)
+
+    app = build_graph()
+
+    while True:
+        try:
+            user_input = input("\n🔧 질문> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n종료합니다.")
+            break
+
+        if not user_input:
+            continue
+        if user_input.lower() in ("quit", "q", "exit"):
+            print("종료합니다.")
+            break
+
+        print(f"\n⏳ 처리 중...")
+
+        try:
+            result = app.invoke({
+                "messages": [],
+                "intent": "",
+                "intent_detail": "",
+                "trace_log": [],
+                "user_input": user_input,
+                "final_answer": "",
+            })
+
+            answer = result.get("final_answer", "응답을 생성하지 못했습니다.")
+            intent = result.get("intent", "unknown")
+            trace_log = result.get("trace_log", [])
+
+            # 응답 출력
+            print(f"\n📋 [의도: {intent}]")
+            print("-" * 40)
+            print(answer)
+            print("-" * 40)
+
+            # 트레이스 저장
+            trace_path = save_trace(user_input, intent, trace_log)
+            print(f"📝 Trace 저장: {trace_path.name}")
+
+        except Exception as e:
+            print(f"\n❌ 오류: {e}")
+            import traceback
+            traceback.print_exc()
+
+
+if __name__ == "__main__":
+    main()
