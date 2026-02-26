@@ -348,8 +348,10 @@ langgraph-agent/
 ├── snapshots/               # GitHub에서 볼 수 있는 데이터 스냅샷
 │   ├── db_dump.py           #   logistics.db → db_snapshot.json
 │   ├── db_snapshot.json     #   DB 전체 데이터 (장비 30, 부하율 720, 알림 250건)
-│   ├── traces_dump.py       #   traces/*.md → traces_snapshot.json
-│   └── traces_snapshot.json #   에이전트 실행 트레이스 전문 (13건)
+│   ├── traces_dump.py       #   traces/*.md → snapshots/traces/ 복사
+│   └── traces/              #   실행 트레이스 MD 원본 (GitHub 렌더링 가능)
+│       ├── README.md        #     인덱스 (시간, 질문, 의도 테이블)
+│       └── trace_*.md       #     13건의 에이전트 실행 기록
 │
 ├── examples/                # 트레이스 예시 (curated)
 │   ├── trace_overload_check.md
@@ -494,12 +496,15 @@ alert_threshold (장비 유형별 독립)
 ## 데이터 스냅샷
 
 `logistics.db`와 `traces/*.md`는 바이너리/gitignore라 GitHub에서 볼 수 없습니다.
-`snapshots/` 디렉토리에 JSON 덤프를 생성하여 GitHub에서 확인할 수 있습니다.
+`snapshots/` 디렉토리에 스냅샷을 생성하여 GitHub에서 확인할 수 있습니다.
 
-| 스냅샷 파일 | 내용 | 재생성 명령 |
-|-------------|------|-------------|
-| `snapshots/db_snapshot.json` | DB 전체 데이터 (장비 30, 부하율 720, 임계값 6, 알림 250건) | `python -m snapshots.db_dump` |
-| `snapshots/traces_snapshot.json` | 에이전트 실행 트레이스 전문 (13건) | `python -m snapshots.traces_dump` |
+| 스냅샷 | 내용 | 형식 | 재생성 명령 |
+|--------|------|------|-------------|
+| [`snapshots/db_snapshot.json`](snapshots/db_snapshot.json) | DB 전체 데이터 (장비 30, 부하율 720, 임계값 6, 알림 250건) | JSON | `python -m snapshots.db_dump` |
+| [`snapshots/traces/`](snapshots/traces/) | 에이전트 실행 트레이스 (13건) | Markdown | `python -m snapshots.traces_dump` |
+
+- **DB 스냅샷**: JSON 파일로 테이블별 row 데이터 확인
+- **트레이스 스냅샷**: MD 파일 그대로 복사 → GitHub 마크다운 렌더링으로 바로 읽기 가능. [`README.md`](snapshots/traces/README.md) 인덱스에서 시간/질문/의도별로 탐색.
 
 ```bash
 # 데이터 변경 후 스냅샷 재생성
