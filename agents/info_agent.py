@@ -43,7 +43,17 @@ def info_node(state: AgentState) -> dict:
         else:
             trace.append(f"### LLM 호출 (메시지 히스토리 {len(messages)}건 포함)")
     else:
+        # 대화 이력이 있으면 문맥 포함
+        history = state.get("conversation_history", [])
+        history_ctx = ""
+        if history:
+            ctx_lines = ["[이전 대화 이력]"]
+            for h in history[-3:]:
+                ctx_lines.append(f"- Q: {h['user']} → intent: {h.get('intent', '')}, 응답: {h.get('answer', '')[:200]}")
+            history_ctx = "\n".join(ctx_lines) + "\n\n"
+
         prompt = (
+            f"{history_ctx}"
             f"사용자 질문: {user_input}\n"
             f"의도: {intent}\n"
             f"상세: {intent_detail}\n\n"

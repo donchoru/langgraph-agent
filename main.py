@@ -33,6 +33,7 @@ def main():
     print("=" * 60)
 
     app = build_graph()
+    conversation_history = []  # 멀티턴 대화 이력
 
     while True:
         try:
@@ -46,6 +47,10 @@ def main():
         if user_input.lower() in ("quit", "q", "exit"):
             print("종료합니다.")
             break
+        if user_input.lower() == "clear":
+            conversation_history.clear()
+            print("🗑️ 대화 이력 초기화.")
+            continue
 
         print(f"\n⏳ 처리 중...")
 
@@ -57,6 +62,7 @@ def main():
                 "trace_log": [],
                 "user_input": user_input,
                 "final_answer": "",
+                "conversation_history": list(conversation_history),
             })
 
             answer = result.get("final_answer", "응답을 생성하지 못했습니다.")
@@ -68,6 +74,15 @@ def main():
             print("-" * 40)
             print(answer)
             print("-" * 40)
+
+            # 대화 이력에 추가 (최근 10턴 유지)
+            conversation_history.append({
+                "user": user_input,
+                "answer": answer[:300],
+                "intent": intent,
+            })
+            if len(conversation_history) > 10:
+                conversation_history = conversation_history[-10:]
 
             # 트레이스 저장
             trace_path = save_trace(user_input, intent, trace_log)

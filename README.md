@@ -323,13 +323,13 @@ class AgentState(TypedDict):
 
 ```
 langgraph-agent/
-├── main.py                  # 대화형 실행 진입점
+├── main.py                  # 대화형 실행 진입점 (멀티턴 대화 이력 지원)
 ├── config.py                # 환경 변수, 경로, 모델 설정
 ├── requirements.txt         # Python 의존성
 ├── .env.example             # 환경 변수 템플릿
 │
 ├── agents/                  # 에이전트 모듈
-│   ├── state.py             #   AgentState 타입 정의
+│   ├── state.py             #   AgentState 타입 정의 (conversation_history 포함)
 │   ├── prompts.py           #   시스템 프롬프트 (의도분석, 정보조회)
 │   ├── intent_agent.py      #   IntentAgent — 의도 분류
 │   └── info_agent.py        #   InfoAgent + ResponseAgent
@@ -354,17 +354,20 @@ langgraph-agent/
 │   ├── traces_dump.py       #   traces/*.md → snapshots/traces/ 복사
 │   └── traces/              #   실행 트레이스 MD 원본 (GitHub 렌더링 가능)
 │       ├── README.md        #     인덱스 (시간, 질문, 의도 테이블)
-│       └── trace_*.md       #     8건의 에이전트 실행 기록
+│       └── trace_*.md       #     15건의 에이전트 실행 기록 (멀티턴 포함)
 │
-├── examples/                # 학습용 트레이스 예시 (8건)
-│   ├── trace_overload_check.md       #   과부하 장비 조회 + Tool 루프
-│   ├── trace_load_rate_query.md      #   파라미터 추출 → 전파 체인
-│   ├── trace_zone_summary.md         #   같은 의도 다른 Tool 선택
-│   ├── trace_alert_check.md          #   대용량 데이터 처리
-│   ├── trace_general_chat.md         #   최단 경로 (Tool 스킵)
-│   ├── trace_cascading_analysis.md   #   멀티 Tool 병렬 호출
-│   ├── trace_lot_disambiguation.md   #   ⚠ 의미 모호성 해소 (핵심)
-│   └── trace_lot_specific_query.md   #   명확 vs 모호 질문 비교
+├── examples/                # 학습용 트레이스 예시 (11건)
+│   ├── trace_overload_check.md          #   과부하 장비 조회 + Tool 루프
+│   ├── trace_load_rate_query.md         #   파라미터 추출 → 전파 체인
+│   ├── trace_zone_summary.md            #   같은 의도 다른 Tool 선택
+│   ├── trace_alert_check.md             #   대용량 데이터 처리
+│   ├── trace_general_chat.md            #   최단 경로 (Tool 스킵)
+│   ├── trace_cascading_analysis.md      #   멀티 Tool 병렬 호출
+│   ├── trace_lot_disambiguation.md      #   ⚠ 의미 모호성 해소 (핵심)
+│   ├── trace_lot_specific_query.md      #   명확 vs 모호 질문 비교
+│   ├── trace_multiturn_followup.md      #   멀티턴 연속 심화 (3턴)
+│   ├── trace_multiturn_topic_switch.md  #   멀티턴 토픽 전환
+│   └── trace_multiturn_context_carry.md #   멀티턴 문맥 이어가기 ("그럼 B는?")
 │
 └── logistics.db             # SQLite DB — gitignore (seed 실행 후 생성)
 ```
@@ -538,7 +541,7 @@ LOT-005: 현재 AGV-L1-CELL-01 위에서 이동 중
 | 스냅샷 | 내용 | 형식 | 재생성 명령 |
 |--------|------|------|-------------|
 | [`snapshots/db_snapshot.json`](snapshots/db_snapshot.json) | DB 전체 데이터 (장비 30, 부하율 720, 임계값 6, 알림 250, Lot 40, 스케줄 58건) | JSON | `python -m snapshots.db_dump` |
-| [`snapshots/traces/`](snapshots/traces/) | 에이전트 실행 트레이스 (8건, Lot 모호성 해소 포함) | Markdown | `python -m snapshots.traces_dump` |
+| [`snapshots/traces/`](snapshots/traces/) | 에이전트 실행 트레이스 (15건, 멀티턴 + Lot 모호성 해소 포함) | Markdown | `python -m snapshots.traces_dump` |
 
 - **DB 스냅샷**: JSON 파일로 테이블별 row 데이터 확인
 - **트레이스 스냅샷**: MD 파일 그대로 복사 → GitHub 마크다운 렌더링으로 바로 읽기 가능. [`README.md`](snapshots/traces/README.md) 인덱스에서 시간/질문/의도별로 탐색.

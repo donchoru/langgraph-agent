@@ -11,6 +11,7 @@ class AgentState(TypedDict):
     trace_log: list[str]   # 트레이스 로그 라인
     user_input: str        # 원본 사용자 입력
     final_answer: str      # 최종 응답
+    conversation_history: list[dict]  # 이전 턴 이력 [{"user": "...", "answer": "...", "intent": "..."}]
 
 
 def _fmt_message(msg: BaseMessage) -> str:
@@ -36,14 +37,18 @@ def _fmt_message(msg: BaseMessage) -> str:
 
 def dump_state(state: AgentState) -> list[str]:
     """현재 AgentState 전체를 트레이스용 Markdown 라인 리스트로 변환."""
+    history = state.get("conversation_history", [])
     lines = [
         "### State Snapshot",
         f"- **user_input**: `{state.get('user_input', '')}`",
         f"- **intent**: `{state.get('intent', '')}`",
         f"- **intent_detail**: `{state.get('intent_detail', '')}`",
         f"- **final_answer**: `{(state.get('final_answer', '') or '')[:200]}`",
-        f"- **messages** ({len(state.get('messages', []))}건):",
+        f"- **conversation_history** ({len(history)}턴):",
     ]
+    for h in history[-3:]:  # 최근 3턴만 표시
+        lines.append(f"  - Q: `{h.get('user', '')}` → A: `{h.get('answer', '')[:80]}...` ({h.get('intent', '')})")
+    lines.append(f"- **messages** ({len(state.get('messages', []))}건):")
     for msg in state.get("messages", []):
         lines.append(_fmt_message(msg))
     return lines
