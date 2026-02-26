@@ -168,6 +168,59 @@ def get_zone_summary(line: Optional[str] = None) -> str:
     return json.dumps(rows, ensure_ascii=False)
 
 
+@tool
+def get_lots_on_equipment(equipment_id: str) -> str:
+    """설비에 현재 물리적으로 위치한 Lot 조회.
+    ⚠ '설비의 Lot'이라는 질문에서 '현재 물리적으로 있는 Lot'을 의미할 때 사용.
+    스케줄(예정)된 Lot을 보려면 get_lots_scheduled_for_equipment를 사용하세요."""
+    rows = query(
+        """SELECT l.lot_id, l.product_type, l.quantity, l.status,
+                  l.current_equipment_id, l.created_at, l.updated_at
+           FROM lot l
+           WHERE l.current_equipment_id = ?
+             AND l.status IN ('IN_TRANSIT', 'IN_PROCESS')
+           ORDER BY l.updated_at DESC""",
+        (equipment_id.upper(),),
+    )
+    return json.dumps(rows, ensure_ascii=False)
+
+
+@tool
+def get_lots_scheduled_for_equipment(equipment_id: str) -> str:
+    """설비에 예정(스케줄)된 Lot 조회.
+    ⚠ '설비의 Lot'이라는 질문에서 '앞으로 처리할 예정인 Lot'을 의미할 때 사용.
+    현재 물리적으로 있는 Lot을 보려면 get_lots_on_equipment를 사용하세요."""
+    rows = query(
+        """SELECT ls.lot_id, l.product_type, l.quantity, l.status,
+                  l.current_equipment_id,
+                  ls.equipment_id AS scheduled_equipment_id,
+                  ls.scheduled_start, ls.scheduled_end,
+                  ls.actual_start, ls.actual_end
+           FROM lot_schedule ls
+           JOIN lot l ON ls.lot_id = l.lot_id
+           WHERE ls.equipment_id = ?
+             AND ls.actual_end IS NULL
+           ORDER BY ls.scheduled_start""",
+        (equipment_id.upper(),),
+    )
+    return json.dumps(rows, ensure_ascii=False)
+
+
+@tool
+def get_lot_detail(lot_id: str) -> str:
+    """특정 Lot의 상세 정보 — 현재 위치, 상태, 스케줄 이력 전부 포함."""
+    lot_info = query("SELECT * FROM lot WHERE lot_id = ?", (lot_id.upper(),))
+    schedules = query(
+        """SELECT ls.*, e.equipment_type, e.line, e.zone
+           FROM lot_schedule ls
+           JOIN equipment e ON ls.equipment_id = e.equipment_id
+           WHERE ls.lot_id = ?
+           ORDER BY ls.scheduled_start""",
+        (lot_id.upper(),),
+    )
+    return json.dumps({"lot": lot_info, "schedules": schedules}, ensure_ascii=False)
+
+
 ALL_TOOLS = [
     get_equipment_list,
     get_equipment_status,
@@ -176,4 +229,7 @@ ALL_TOOLS = [
     get_equipment_detail,
     get_recent_alerts,
     get_zone_summary,
+    get_lots_on_equipment,
+    get_lots_scheduled_for_equipment,
+    get_lot_detail,
 ]

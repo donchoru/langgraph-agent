@@ -1,4 +1,4 @@
-"""샘플 데이터 생성 — 장비 30대, 부하율 720건, 알림 이력."""
+"""샘플 데이터 생성 — 장비 30대, 부하율 720건, 알림 이력, Lot 40건."""
 import random
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -31,8 +31,8 @@ def seed():
         # 스키마 생성
         conn.executescript(SCHEMA_PATH.read_text())
 
-        # 기존 데이터 삭제
-        for table in ["alert_history", "load_rate", "alert_threshold", "equipment"]:
+        # 기존 데이터 삭제 (FK 순서)
+        for table in ["lot_schedule", "lot", "alert_history", "load_rate", "alert_threshold", "equipment"]:
             conn.execute(f"DELETE FROM {table}")
 
         random.seed(42)
@@ -107,13 +107,93 @@ def seed():
             alert_rows,
         )
 
+        # ── Lot 40건 + 스케줄 생성 ──────────────────────────
+        PRODUCT_TYPES = ["OLED_A", "OLED_B", "LCD_C"]
+        LOT_STATUSES = (
+            ["SCHEDULED"] * 10 + ["IN_TRANSIT"] * 8
+            + ["IN_PROCESS"] * 15 + ["COMPLETED"] * 7
+        )
+        random.shuffle(LOT_STATUSES)
+
+        equipment_ids = [e[0] for e in equipments]
+        running_ids = [e[0] for e in equipments if e[4] == "RUNNING"]
+        agv_ids = [e[0] for e in equipments if e[1] == "AGV"]
+
+        lot_rows = []
+        schedule_rows = []
+
+        for i in range(40):
+            lot_id = f"LOT-{i + 1:03d}"
+            product = random.choice(PRODUCT_TYPES)
+            qty = random.randint(100, 500)
+            status = LOT_STATUSES[i]
+            created = (now - timedelta(hours=random.randint(1, 48))).strftime("%Y-%m-%d %H:%M:%S")
+            updated = (now - timedelta(minutes=random.randint(0, 120))).strftime("%Y-%m-%d %H:%M:%S")
+
+            if status == "SCHEDULED":
+                # 아직 미배정 — current_equipment_id = NULL
+                current_equip = None
+            elif status == "IN_TRANSIT":
+                # AGV 위에 있음 (이동 중)
+                current_equip = random.choice(agv_ids) if agv_ids else random.choice(equipment_ids)
+            elif status == "IN_PROCESS":
+                # 설비에서 가동 중
+                current_equip = random.choice(running_ids) if running_ids else random.choice(equipment_ids)
+            else:  # COMPLETED
+                current_equip = random.choice(equipment_ids)
+
+            lot_rows.append((lot_id, product, qty, status, current_equip, created, updated))
+
+            # 스케줄 생성 — 각 Lot에 1~2개 스케줄
+            num_schedules = random.randint(1, 2)
+            for j in range(num_schedules):
+                sched_equip = random.choice(running_ids) if running_ids else random.choice(equipment_ids)
+                sched_start = (now + timedelta(hours=random.randint(-2, 8))).strftime("%Y-%m-%d %H:%M:%S")
+                sched_end = (now + timedelta(hours=random.randint(9, 16))).strftime("%Y-%m-%d %H:%M:%S")
+
+                if status == "COMPLETED":
+                    actual_start = (now - timedelta(hours=random.randint(3, 10))).strftime("%Y-%m-%d %H:%M:%S")
+                    actual_end = (now - timedelta(hours=random.randint(0, 2))).strftime("%Y-%m-%d %H:%M:%S")
+                elif status == "IN_PROCESS" and j == 0:
+                    sched_equip = current_equip  # 가동 중이면 첫 스케줄은 현재 설비
+                    actual_start = (now - timedelta(minutes=random.randint(10, 60))).strftime("%Y-%m-%d %H:%M:%S")
+                    actual_end = None
+                else:
+                    actual_start = None
+                    actual_end = None
+
+                schedule_rows.append((lot_id, sched_equip, sched_start, sched_end, actual_start, actual_end))
+
+        # ── 의미 모호성 시나리오 강제 삽입 ──────────────────
+        # LOT-005: AGV에서 이동 중이지만 스케줄은 CVR 설비
+        if len(lot_rows) >= 5:
+            old = lot_rows[4]
+            target_agv = agv_ids[0] if agv_ids else equipment_ids[0]
+            target_cvr = [e[0] for e in equipments if e[1] == "CONVEYOR"]
+            target_cvr = target_cvr[0] if target_cvr else equipment_ids[1]
+            lot_rows[4] = (old[0], old[1], old[2], "IN_TRANSIT", target_agv, old[5], old[6])
+            # 스케줄에 CVR 설비로 예정 추가
+            sched_start = (now + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+            sched_end = (now + timedelta(hours=5)).strftime("%Y-%m-%d %H:%M:%S")
+            schedule_rows.append((old[0], target_cvr, sched_start, sched_end, None, None))
+
+        conn.executemany(
+            "INSERT INTO lot VALUES (?,?,?,?,?,?,?)", lot_rows,
+        )
+        conn.executemany(
+            "INSERT INTO lot_schedule (lot_id, equipment_id, scheduled_start, scheduled_end, actual_start, actual_end) VALUES (?,?,?,?,?,?)",
+            schedule_rows,
+        )
+
         conn.commit()
 
         # 결과 요약
         eq_count = conn.execute("SELECT COUNT(*) FROM equipment").fetchone()[0]
         lr_count = conn.execute("SELECT COUNT(*) FROM load_rate").fetchone()[0]
         al_count = conn.execute("SELECT COUNT(*) FROM alert_history").fetchone()[0]
-        print(f"Seed 완료: 장비 {eq_count}대, 부하율 {lr_count}건, 알림 {al_count}건")
+        lot_count = conn.execute("SELECT COUNT(*) FROM lot").fetchone()[0]
+        sched_count = conn.execute("SELECT COUNT(*) FROM lot_schedule").fetchone()[0]
+        print(f"Seed 완료: 장비 {eq_count}대, 부하율 {lr_count}건, 알림 {al_count}건, Lot {lot_count}건, 스케줄 {sched_count}건")
 
     finally:
         conn.close()

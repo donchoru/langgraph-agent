@@ -14,7 +14,7 @@ from db.connection import get_connection
 
 OUTPUT_PATH = Path(__file__).parent / "db_snapshot.json"
 
-TABLES = ["equipment", "load_rate", "alert_threshold", "alert_history"]
+TABLES = ["equipment", "load_rate", "alert_threshold", "alert_history", "lot", "lot_schedule"]
 
 
 def dump():

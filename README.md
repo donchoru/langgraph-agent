@@ -29,7 +29,7 @@ LangGraph 기반 **2단계 멀티 에이전트 파이프라인**으로 구현한
 graph TD
     START([사용자 질문]) --> INTENT[IntentAgent<br/>의도분석]
     INTENT -->|general_chat| RESPOND[ResponseAgent<br/>응답생성]
-    INTENT -->|equipment_status<br/>load_rate_query<br/>alert_check<br/>overload_check| INFO[InfoAgent<br/>정보조회]
+    INTENT -->|equipment_status<br/>load_rate_query<br/>alert_check<br/>overload_check<br/>lot_query| INFO[InfoAgent<br/>정보조회]
     INFO -->|tool_calls 있음| TOOLS[ToolNode<br/>SQL 실행]
     TOOLS --> INFO
     INFO -->|tool_calls 없음| RESPOND
@@ -50,7 +50,7 @@ graph TD
 ### 1. IntentAgent (의도분석)
 
 > **파일**: `agents/intent_agent.py`
-> **역할**: 사용자의 자연어 질문을 5가지 의도 중 하나로 분류
+> **역할**: 사용자의 자연어 질문을 6가지 의도 중 하나로 분류
 
 #### 입력
 | 필드 | 설명 |
@@ -77,6 +77,7 @@ graph TD
 | `load_rate_query` | 부하율 수치 조회 | "L1 컨베이어 부하율 알려줘" |
 | `alert_check` | 알림 이력 확인 | "최근 알림 이력 보여줘" |
 | `overload_check` | 과부하 장비 확인 | "과부하 장비 있어?" |
+| `lot_query` | Lot 조회 (위치/상태/스케줄) | "CVR-L1-TFT-01에 Lot 뭐 있어?" |
 | `general_chat` | 일반 대화 | "안녕하세요" |
 
 #### LLM 출력 형식
@@ -130,7 +131,9 @@ graph TD
 | `load_rate_query` | `get_load_rates` (+ `get_zone_summary`) |
 | `alert_check` | `get_recent_alerts` |
 | `overload_check` | `get_overloaded_equipment` |
+| `lot_query` | `get_lots_on_equipment` + `get_lots_scheduled_for_equipment` (모호 시 둘 다) |
 | 특정 장비 ID 언급 시 | `get_equipment_detail` |
+| 특정 LOT ID 언급 시 | `get_lot_detail` |
 
 #### 에러 처리
 - LLM 호출 실패 시 `try/except`로 캐치
@@ -335,10 +338,10 @@ langgraph-agent/
 │   └── workflow.py          #   StateGraph 정의, 노드/엣지 연결
 │
 ├── tools/                   # SQL Tool 함수
-│   └── sql_tools.py         #   7개 @tool 데코레이터 함수
+│   └── sql_tools.py         #   10개 @tool 데코레이터 함수
 │
 ├── db/                      # 데이터베이스
-│   ├── schema.sql           #   테이블 스키마 (4개 테이블)
+│   ├── schema.sql           #   테이블 스키마 (6개 테이블)
 │   ├── connection.py        #   SQLite 연결 유틸리티
 │   └── seed.py              #   샘플 데이터 생성기
 │
@@ -347,18 +350,21 @@ langgraph-agent/
 │
 ├── snapshots/               # GitHub에서 볼 수 있는 데이터 스냅샷
 │   ├── db_dump.py           #   logistics.db → db_snapshot.json
-│   ├── db_snapshot.json     #   DB 전체 데이터 (장비 30, 부하율 720, 알림 250건)
+│   ├── db_snapshot.json     #   DB 전체 데이터 (장비 30, 부하율 720, 알림 250, Lot 40, 스케줄 58건)
 │   ├── traces_dump.py       #   traces/*.md → snapshots/traces/ 복사
 │   └── traces/              #   실행 트레이스 MD 원본 (GitHub 렌더링 가능)
 │       ├── README.md        #     인덱스 (시간, 질문, 의도 테이블)
-│       └── trace_*.md       #     13건의 에이전트 실행 기록
+│       └── trace_*.md       #     8건의 에이전트 실행 기록
 │
-├── examples/                # 트레이스 예시 (curated)
-│   ├── trace_overload_check.md
-│   ├── trace_load_rate_query.md
-│   ├── trace_alert_check.md
-│   ├── trace_zone_summary.md
-│   └── trace_general_chat.md
+├── examples/                # 학습용 트레이스 예시 (8건)
+│   ├── trace_overload_check.md       #   과부하 장비 조회 + Tool 루프
+│   ├── trace_load_rate_query.md      #   파라미터 추출 → 전파 체인
+│   ├── trace_zone_summary.md         #   같은 의도 다른 Tool 선택
+│   ├── trace_alert_check.md          #   대용량 데이터 처리
+│   ├── trace_general_chat.md         #   최단 경로 (Tool 스킵)
+│   ├── trace_cascading_analysis.md   #   멀티 Tool 병렬 호출
+│   ├── trace_lot_disambiguation.md   #   ⚠ 의미 모호성 해소 (핵심)
+│   └── trace_lot_specific_query.md   #   명확 vs 모호 질문 비교
 │
 └── logistics.db             # SQLite DB — gitignore (seed 실행 후 생성)
 ```
@@ -387,7 +393,7 @@ cp .env.example .env
 
 # 4. 샘플 데이터 생성
 python -m db.seed
-# 출력: Seed 완료: 장비 30대, 부하율 720건, 알림 250건
+# 출력: Seed 완료: 장비 30대, 부하율 720건, 알림 250건, Lot 40건, 스케줄 58건
 
 # 5. 실행
 python main.py
@@ -430,16 +436,39 @@ python main.py
 | `load_rate` | 부하율 시계열 데이터 (10분 간격) | 720건 |
 | `alert_threshold` | 장비 유형별 경고/임계 기준값 | 6건 |
 | `alert_history` | 알림 이력 | ~250건 |
+| `lot` | Lot(생산 단위) — 상태, 현재 물리적 위치 | 40건 |
+| `lot_schedule` | Lot 스케줄(생산 계획) — 설비별 예정 시간 | ~58건 |
 
 ### ER 다이어그램
 
 ```
 equipment (1) ──── (N) load_rate
     │
-    └── (1) ──── (N) alert_history
+    ├── (1) ──── (N) alert_history
+    │
+    ├── (1) ──── (N) lot              ← current_equipment_id (물리적 위치)
+    │
+    └── (1) ──── (N) lot_schedule     ← equipment_id (스케줄 설비)
+
+lot (1) ──── (N) lot_schedule
 
 alert_threshold (장비 유형별 독립)
 ```
+
+### ⚠ Lot 의미 모호성 (Semantic Disambiguation)
+
+`lot.current_equipment_id`와 `lot_schedule.equipment_id`는 **다를 수 있음**:
+
+```
+LOT-005: 현재 AGV-L1-CELL-01 위에서 이동 중
+         스케줄은 CVR-L1-TFT-01에서 처리 예정
+```
+
+"CVR-L1-TFT-01에 Lot 뭐 있어?" 질문 시:
+- **물리적 위치**: `lot.current_equipment_id = 'CVR-L1-TFT-01'` → 2건
+- **스케줄**: `lot_schedule.equipment_id = 'CVR-L1-TFT-01'` → 6건 (이동 중 Lot 포함)
+
+이 모호성을 프롬프트 규칙으로 해소 → [`examples/trace_lot_disambiguation.md`](examples/trace_lot_disambiguation.md) 참고
 
 ### 장비 유형별 임계값
 
@@ -461,7 +490,7 @@ alert_threshold (장비 유형별 독립)
 
 ---
 
-## SQL Tools (7개)
+## SQL Tools (10개)
 
 > **파일**: `tools/sql_tools.py`
 > LangChain `@tool` 데코레이터로 정의. Gemini의 Function Calling을 통해 자동 호출됨.
@@ -475,6 +504,11 @@ alert_threshold (장비 유형별 독립)
 | 5 | `get_equipment_detail` | 특정 장비 상세 + 이력 | `equipment_id` (필수) |
 | 6 | `get_recent_alerts` | 최근 알림 이력 | `hours`, `alert_type` (모두 선택) |
 | 7 | `get_zone_summary` | 구간별 부하율 요약 (평균/최대/최소) | `line` (선택) |
+| 8 | `get_lots_on_equipment` | 설비에 **물리적으로** 있는 Lot | `equipment_id` (필수) |
+| 9 | `get_lots_scheduled_for_equipment` | 설비에 **스케줄된** Lot | `equipment_id` (필수) |
+| 10 | `get_lot_detail` | 특정 Lot 상세 (위치+스케줄) | `lot_id` (필수) |
+
+> Tool 8, 9는 **의미 모호성 해소** 패턴: 모호한 질문 시 LLM이 둘 다 동시 호출
 
 ---
 
@@ -490,6 +524,9 @@ alert_threshold (장비 유형별 독립)
 | "L2 구간별 부하율 요약" | `load_rate_query` | `get_zone_summary` |
 | "L3 장비 상태 어때?" | `equipment_status` | `get_equipment_status` |
 | "크레인 장비 목록" | `equipment_status` | `get_equipment_list` |
+| "CVR-L1-TFT-01에 Lot 뭐 있어?" | `lot_query` | `get_lots_on_equipment` + `get_lots_scheduled_for_equipment` (**동시 호출**) |
+| "LOT-005 지금 어디야?" | `lot_query` | `get_lot_detail` |
+| "CVR-L1-TFT-01에 예정된 Lot?" | `lot_query` | `get_lots_scheduled_for_equipment` |
 
 ---
 
@@ -500,8 +537,8 @@ alert_threshold (장비 유형별 독립)
 
 | 스냅샷 | 내용 | 형식 | 재생성 명령 |
 |--------|------|------|-------------|
-| [`snapshots/db_snapshot.json`](snapshots/db_snapshot.json) | DB 전체 데이터 (장비 30, 부하율 720, 임계값 6, 알림 250건) | JSON | `python -m snapshots.db_dump` |
-| [`snapshots/traces/`](snapshots/traces/) | 에이전트 실행 트레이스 (13건) | Markdown | `python -m snapshots.traces_dump` |
+| [`snapshots/db_snapshot.json`](snapshots/db_snapshot.json) | DB 전체 데이터 (장비 30, 부하율 720, 임계값 6, 알림 250, Lot 40, 스케줄 58건) | JSON | `python -m snapshots.db_dump` |
+| [`snapshots/traces/`](snapshots/traces/) | 에이전트 실행 트레이스 (8건, Lot 모호성 해소 포함) | Markdown | `python -m snapshots.traces_dump` |
 
 - **DB 스냅샷**: JSON 파일로 테이블별 row 데이터 확인
 - **트레이스 스냅샷**: MD 파일 그대로 복사 → GitHub 마크다운 렌더링으로 바로 읽기 가능. [`README.md`](snapshots/traces/README.md) 인덱스에서 시간/질문/의도별로 탐색.
