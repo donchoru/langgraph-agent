@@ -31,7 +31,7 @@ tools/
   sql_tools.py              # @tool 10개 + ALL_TOOLS
 db/
   schema.sql, connection.py, seed.py
-examples/                   # 학습 예시 11건
+examples/                   # 학습 예시 12건
 snapshots/
   db_dump.py, traces_dump.py
 ```

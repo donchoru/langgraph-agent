@@ -11,8 +11,10 @@ _tool_node = ToolNode(ALL_TOOLS)
 
 def tool_node_with_trace(state: AgentState) -> dict:
     """ToolNode 래퍼 — 실행 전후 State 스냅샷을 트레이스에 기록."""
+    tool_call_round = state.get("tool_call_round", 0)
+    round_label = f" (Round {tool_call_round})" if tool_call_round > 0 else ""
     trace = [
-        f"\n---\n## Step 2.5: ToolNode (SQL 실행)",
+        f"\n---\n## Step 2.5: ToolNode (SQL 실행){round_label}",
         f"### State BEFORE",
     ]
     trace += dump_state(state)

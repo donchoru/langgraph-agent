@@ -12,6 +12,7 @@ class AgentState(TypedDict):
     user_input: str        # 원본 사용자 입력
     final_answer: str      # 최종 응답
     conversation_history: list[dict]  # 이전 턴 이력 [{"user": "...", "answer": "...", "intent": "..."}]
+    tool_call_round: int   # 도구 호출 라운드 카운터 (무한 루프 방지, 기본 0)
 
 
 def _fmt_message(msg: BaseMessage) -> str:

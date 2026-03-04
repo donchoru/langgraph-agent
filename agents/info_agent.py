@@ -7,6 +7,7 @@ from agents.message_trimmer import prepare_messages
 from tools.sql_tools import ALL_TOOLS
 from config import GEMINI_API_KEY, GEMINI_MODEL
 
+MAX_TOOL_ROUNDS = 3
 
 llm = ChatGoogleGenerativeAI(
     model=GEMINI_MODEL,
@@ -18,15 +19,17 @@ llm = ChatGoogleGenerativeAI(
 def info_node(state: AgentState) -> dict:
     """정보조회 노드 — Tool 호출을 위한 LLM 호출.
     첫 호출: 시스템+사용자 프롬프트로 tool 호출 유도.
-    재진입(tool 결과 반환 후): 전체 메시지 히스토리를 전달하여 최종 응답 생성.
+    재진입(tool 결과 반환 후): 결과 분석 → 추가 도구 호출 또는 최종 응답 생성.
     """
     intent = state["intent"]
     intent_detail = state["intent_detail"]
     user_input = state["user_input"]
     messages = state.get("messages", [])
+    tool_call_round = state.get("tool_call_round", 0)
 
     reentry = bool(messages)
-    step_label = "InfoAgent 재진입 (Tool 결과 수신)" if reentry else "InfoAgent (정보조회)"
+    round_label = f" (Round {tool_call_round})" if reentry else ""
+    step_label = f"InfoAgent 재진입 (Tool 결과 수신){round_label}" if reentry else "InfoAgent (정보조회)"
 
     trace = [
         f"\n---\n## Step 2: {step_label}",
@@ -37,14 +40,28 @@ def info_node(state: AgentState) -> dict:
     # 이미 메시지가 있으면 (tool 결과 포함) 트리밍 후 히스토리로 호출
     if reentry:
         trimmed = prepare_messages(list(messages))
-        llm_messages = [SystemMessage(content=INFO_SYSTEM_PROMPT)] + trimmed
+
+        # 라운드 제한에 따라 지시 메시지 추가
+        if tool_call_round < MAX_TOOL_ROUNDS:
+            guide_msg = HumanMessage(content=(
+                "도구 실행 결과를 분석하세요. "
+                "사용자의 질문에 완전히 답하기 위해 추가 조회가 필요하면 도구를 더 호출하고, "
+                "충분한 정보가 모였으면 최종 응답을 생성하세요."
+            ))
+        else:
+            guide_msg = HumanMessage(content=(
+                "더 이상 도구를 호출하지 말고 현재까지의 결과로 최종 응답을 생성하세요."
+            ))
+
+        llm_messages = [SystemMessage(content=INFO_SYSTEM_PROMPT)] + trimmed + [guide_msg]
         trim_note = (f"원본 {len(messages)}건 → 트리밍 {len(trimmed)}건"
                      if len(trimmed) < len(messages)
                      else f"메시지 히스토리 {len(messages)}건 포함")
         trace += [
-            f"### 🔷 FM 입력 (→ Gemini {GEMINI_MODEL}, 재진입)",
-            f"- **System**: INFO_SYSTEM_PROMPT (도구 10개 + 모호성 해소 규칙, {len(INFO_SYSTEM_PROMPT)}자)",
+            f"### 🔷 FM 입력 (→ Gemini {GEMINI_MODEL}, 재진입 Round {tool_call_round})",
+            f"- **System**: INFO_SYSTEM_PROMPT (도구 10개 + 체이닝 규칙, {len(INFO_SYSTEM_PROMPT)}자)",
             f"- **Messages**: {trim_note}",
+            f"- **Guide**: \"{guide_msg.content}\"",
         ]
         # 메시지 요약 (마지막 3건)
         for m in trimmed[-3:]:
@@ -74,7 +91,7 @@ def info_node(state: AgentState) -> dict:
         ]
         trace += [
             f"### 🔷 FM 입력 (→ Gemini {GEMINI_MODEL}, 첫 호출)",
-            f"- **System**: INFO_SYSTEM_PROMPT (도구 10개 + 모호성 해소 규칙, {len(INFO_SYSTEM_PROMPT)}자)",
+            f"- **System**: INFO_SYSTEM_PROMPT (도구 10개 + 체이닝 규칙, {len(INFO_SYSTEM_PROMPT)}자)",
             f"- **Human**:",
             f"```",
             f"{prompt}",
@@ -92,13 +109,19 @@ def info_node(state: AgentState) -> dict:
             "trace_log": state.get("trace_log", []) + trace,
         }
 
+    result = {
+        "messages": [response],
+        "trace_log": state.get("trace_log", []) + trace,
+    }
+
     if response.tool_calls:
         trace += [
-            f"### 🔶 FM 출력 (← Gemini) → Tool 호출 요청",
+            f"### 🔶 FM 출력 (← Gemini) → Tool 호출 요청 (Round {tool_call_round + 1})",
         ]
         for tc in response.tool_calls:
             trace.append(f"- `{tc['name']}({tc['args']})`")
         trace.append(f"### 다음: ToolNode로 이동")
+        result["tool_call_round"] = tool_call_round + 1
     else:
         trace += [
             f"### 🔶 FM 출력 (← Gemini) → 텍스트 응답",
@@ -115,10 +138,8 @@ def info_node(state: AgentState) -> dict:
     trace += [f"### State AFTER"]
     trace += dump_state(updated)
 
-    return {
-        "messages": [response],
-        "trace_log": state.get("trace_log", []) + trace,
-    }
+    result["trace_log"] = state.get("trace_log", []) + trace
+    return result
 
 
 def respond_node(state: AgentState) -> dict:

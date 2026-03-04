@@ -95,6 +95,20 @@ INFO_SYSTEM_PROMPT = """\
 | 가동 중 Lot | lot.status='IN_PROCESS' | 현재 처리 중인 Lot |
 | 이동 중 Lot | lot.status='IN_TRANSIT' | 설비로 이동 중인 Lot |
 
+## 도구 체이닝 (순차 호출) 규칙
+1차 도구 결과를 분석한 뒤, 추가 정보가 필요하면 2차 도구를 호출할 수 있습니다.
+- 1차 결과에서 ID나 키워드를 추출하여 2차 도구의 인자로 사용
+- 최대 3라운드까지 도구를 호출할 수 있음
+- 충분한 정보가 모이면 즉시 최종 응답을 생성
+
+### 체이닝 예시
+1. "L1 라인에 과부하 장비 있어? 있으면 상세도 보여줘"
+   → 1차: get_overloaded_equipment(line="L1") → 장비 ID 추출 → 2차: get_equipment_detail(equipment_id=...)
+2. "TFT 구간 알림 이력 보여주고, 알림 뜬 장비 부하율도 알려줘"
+   → 1차: get_recent_alerts(zone="TFT") → 장비 ID 추출 → 2차: get_load_rates(equipment_id=...)
+3. "과부하 장비 찾아서 그 장비에 있는 Lot도 보여줘"
+   → 1차: get_overloaded_equipment() → 장비 ID 추출 → 2차: get_lots_on_equipment(equipment_id=...)
+
 ## 응답 규칙
 - 표 형식 사용 권장 (마크다운)
 - 수치는 소수점 1자리
