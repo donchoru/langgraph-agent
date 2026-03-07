@@ -1,17 +1,13 @@
 """의도분석 Agent — 사용자 질문을 의도로 분류."""
 import json
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_google_genai import ChatGoogleGenerativeAI
 from agents.state import AgentState, dump_state
 from agents.prompts import INTENT_SYSTEM_PROMPT
-from config import GEMINI_API_KEY, GEMINI_MODEL
+from config import LLM_MODEL
+from llm_factory import create_llm
 
 
-llm = ChatGoogleGenerativeAI(
-    model=GEMINI_MODEL,
-    google_api_key=GEMINI_API_KEY,
-    temperature=0,
-)
+llm = create_llm(temperature=0)
 
 
 def _build_context(user_input: str, history: list[dict]) -> str:
@@ -64,7 +60,7 @@ def intent_node(state: AgentState) -> dict:
     trace += dump_state(state)
 
     trace += [
-        f"### 🔷 FM 입력 (→ Gemini {GEMINI_MODEL})",
+        f"### 🔷 FM 입력 (→ {LLM_MODEL})",
         f"- **System**: INTENT_SYSTEM_PROMPT (의도 6개 + JSON형식 + 매핑규칙, {len(INTENT_SYSTEM_PROMPT)}자)",
         f"- **Human**:",
         f"```",

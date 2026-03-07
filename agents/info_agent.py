@@ -1,19 +1,15 @@
 """정보조회 Agent — 의도 기반으로 Tool 호출 후 응답 생성."""
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
-from langchain_google_genai import ChatGoogleGenerativeAI
 from agents.state import AgentState, dump_state
 from agents.prompts import INFO_SYSTEM_PROMPT
 from agents.message_trimmer import prepare_messages
 from tools.sql_tools import ALL_TOOLS
-from config import GEMINI_API_KEY, GEMINI_MODEL
+from config import LLM_MODEL
+from llm_factory import create_llm
 
 MAX_TOOL_ROUNDS = 3
 
-llm = ChatGoogleGenerativeAI(
-    model=GEMINI_MODEL,
-    google_api_key=GEMINI_API_KEY,
-    temperature=0,
-).bind_tools(ALL_TOOLS)
+llm = create_llm(temperature=0, bind_tools=ALL_TOOLS)
 
 
 def info_node(state: AgentState) -> dict:
@@ -58,7 +54,7 @@ def info_node(state: AgentState) -> dict:
                      if len(trimmed) < len(messages)
                      else f"메시지 히스토리 {len(messages)}건 포함")
         trace += [
-            f"### 🔷 FM 입력 (→ Gemini {GEMINI_MODEL}, 재진입 Round {tool_call_round})",
+            f"### 🔷 FM 입력 (→ {LLM_MODEL}, 재진입 Round {tool_call_round})",
             f"- **System**: INFO_SYSTEM_PROMPT (도구 10개 + 체이닝 규칙, {len(INFO_SYSTEM_PROMPT)}자)",
             f"- **Messages**: {trim_note}",
             f"- **Guide**: \"{guide_msg.content}\"",
@@ -90,7 +86,7 @@ def info_node(state: AgentState) -> dict:
             HumanMessage(content=prompt),
         ]
         trace += [
-            f"### 🔷 FM 입력 (→ Gemini {GEMINI_MODEL}, 첫 호출)",
+            f"### 🔷 FM 입력 (→ {LLM_MODEL}, 첫 호출)",
             f"- **System**: INFO_SYSTEM_PROMPT (도구 10개 + 체이닝 규칙, {len(INFO_SYSTEM_PROMPT)}자)",
             f"- **Human**:",
             f"```",
@@ -116,7 +112,7 @@ def info_node(state: AgentState) -> dict:
 
     if response.tool_calls:
         trace += [
-            f"### 🔶 FM 출력 (← Gemini) → Tool 호출 요청 (Round {tool_call_round + 1})",
+            f"### 🔶 FM 출력 → Tool 호출 요청 (Round {tool_call_round + 1})",
         ]
         for tc in response.tool_calls:
             trace.append(f"- `{tc['name']}({tc['args']})`")
@@ -124,7 +120,7 @@ def info_node(state: AgentState) -> dict:
         result["tool_call_round"] = tool_call_round + 1
     else:
         trace += [
-            f"### 🔶 FM 출력 (← Gemini) → 텍스트 응답",
+            f"### 🔶 FM 출력 → 텍스트 응답",
             f"```",
             f"{response.content[:500]}",
             f"```",
@@ -158,21 +154,17 @@ def respond_node(state: AgentState) -> dict:
     if intent == "general_chat":
         # 일반 대화 — 간단히 응답
         chat_system = "당신은 친절한 물류 장비 관리 시스템 어시스턴트입니다. 물류와 무관한 질문에는 간단히 답하고, 물류 관련 질문을 유도하세요."
-        simple_llm = ChatGoogleGenerativeAI(
-            model=GEMINI_MODEL,
-            google_api_key=GEMINI_API_KEY,
-            temperature=0.7,
-        )
+        simple_llm = create_llm(temperature=0.7)
         response = simple_llm.invoke([
             SystemMessage(content=chat_system),
             HumanMessage(content=user_input),
         ])
         answer = response.content
         trace += [
-            f"### 🔷 FM 입력 (→ Gemini {GEMINI_MODEL}, 일반대화)",
+            f"### 🔷 FM 입력 (→ {LLM_MODEL}, 일반대화)",
             f"- **System**: \"{chat_system[:80]}...\" ({len(chat_system)}자)",
             f"- **Human**: \"{user_input}\"",
-            f"### 🔶 FM 출력 (← Gemini)",
+            f"### 🔶 FM 출력",
             f"```",
             f"{answer}",
             f"```",

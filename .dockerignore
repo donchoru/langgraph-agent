@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+traces/
+snapshots/
+examples/
+*.pyc
+.git/
+.env
