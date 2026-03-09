@@ -152,18 +152,36 @@ def respond_node(state: AgentState) -> dict:
     trace += dump_state(state)
 
     if intent == "general_chat":
-        # 일반 대화 — 간단히 응답
+        # 일반 대화 — 대화 이력 포함하여 응답
         chat_system = "당신은 친절한 물류 장비 관리 시스템 어시스턴트입니다. 물류와 무관한 질문에는 간단히 답하고, 물류 관련 질문을 유도하세요."
         simple_llm = create_llm(temperature=0.7)
+
+        # 대화 이력이 있으면 문맥 포함 (요약, 대명사 참조 등 대응)
+        history = state.get("conversation_history", [])
+        if history:
+            ctx_lines = ["[이전 대화 이력]"]
+            for h in history[-5:]:
+                ctx_lines.append(f"사용자: {h['user']}")
+                ctx_lines.append(f"의도: {h.get('intent', '')}")
+                ctx_lines.append(f"응답 요약: {h.get('answer', '')[:150]}")
+                ctx_lines.append("")
+            ctx_lines.append(f"[현재 질문]\n{user_input}")
+            human_content = "\n".join(ctx_lines)
+        else:
+            human_content = user_input
+
         response = simple_llm.invoke([
             SystemMessage(content=chat_system),
-            HumanMessage(content=user_input),
+            HumanMessage(content=human_content),
         ])
         answer = response.content
         trace += [
             f"### 🔷 FM 입력 (→ {LLM_MODEL}, 일반대화)",
             f"- **System**: \"{chat_system[:80]}...\" ({len(chat_system)}자)",
-            f"- **Human**: \"{user_input}\"",
+            f"- **Human**:",
+            f"```",
+            f"{human_content}",
+            f"```",
             f"### 🔶 FM 출력",
             f"```",
             f"{answer}",

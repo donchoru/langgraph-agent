@@ -1,8 +1,9 @@
 # 예시 13: 핑퐁 대화 — 일반대화 ↔ 도메인(Tool호출) 교차 전환
 
-> **학습 목표**: 4턴에 걸쳐 `general_chat`(Tool 미사용)과 도메인 의도(Tool 호출)가 **번갈아 나오는** 패턴.
+> **학습 목표**: 5턴에 걸쳐 `general_chat`(Tool 미사용)과 도메인 의도(Tool 호출)가 **번갈아 나오는** 패턴.
 > 매 턴마다 FM이 의도를 독립적으로 판단하되, `conversation_history`에 이전 턴의 혼합된 이력(일반+도메인)이 쌓여도
 > 현재 질문의 성격에 따라 **정확히 라우팅을 전환**하는 FM I/O를 추적한다.
+> Turn 5에서는 **이력 참조형 일반 대화**(대화 요약 요청)를 통해 `ResponseAgent`가 `conversation_history`를 활용하는 패턴을 추가로 검증한다.
 
 ---
 
@@ -13,14 +14,16 @@ Turn 1: "요즘 날씨 너무 덥다"             ← general_chat (Tool X)
 Turn 2: "L1 장비 부하율 어때?"            ← load_rate_query (Tool O)
 Turn 3: "점심 뭐 먹지?"                  ← general_chat (Tool X)
 Turn 4: "알림 이력 최근꺼 보여줘"          ← alert_check (Tool O)
+Turn 5: "지금까지 우리 나눈 대화 요약해줘"  ← general_chat (Tool X, 이력 참조)
 ```
 
-**핵심 관찰**: 일반 → 도메인 → 일반 → 도메인. 매번 경로가 바뀐다.
+**핵심 관찰**: 일반 → 도메인 → 일반 → 도메인 → 일반(이력 참조). 매번 경로가 바뀐다.
 ```
 Turn 1: IntentAgent → ResponseAgent                              (FM 2회)
 Turn 2: IntentAgent → InfoAgent → ToolNode → InfoAgent → Respond (FM 3회+)
 Turn 3: IntentAgent → ResponseAgent                              (FM 2회)
 Turn 4: IntentAgent → InfoAgent → ToolNode → InfoAgent → Respond (FM 3회+)
+Turn 5: IntentAgent → ResponseAgent (이력 포함)                   (FM 2회)
 ```
 
 ---
@@ -399,7 +402,151 @@ conversation_history = [
 
 ---
 
-## FM 호출 요약 (4턴 전체)
+## Turn 5: 지금까지 우리 나눈 대화 요약해줘
+
+### IntentAgent — ⚡ 핵심: 이력 참조형 일반 대화
+
+#### 🔷 FM 입력 (→ Gemini gemini-2.0-flash)
+- **System**: INTENT_SYSTEM_PROMPT (의도 6개 + JSON형식 + 매핑규칙, 984자)
+- **Human** (conversation_history 4턴 포함):
+```
+[이전 대화 이력]
+사용자: 요즘 날씨 너무 덥다
+의도: general_chat
+응답 요약: 정말 덥죠! 이런 날씨에는 장비 온도 관리도 중요한데요...
+
+사용자: L1 장비 부하율 어때?
+의도: load_rate_query
+응답 요약: 📊 L1 라인 장비 부하율 현황...
+
+사용자: 점심 뭐 먹지?
+의도: general_chat
+응답 요약: 더운 날씨엔 냉면이나 냉모밀 어떠세요?...
+
+사용자: 알림 이력 최근꺼 보여줘
+의도: alert_check
+응답 요약: 🔔 최근 알림 이력...
+
+[현재 질문]
+지금까지 우리 나눈 대화 요약해줘
+
+위 대화 이력을 참고하여 현재 질문의 의도를 분석하세요.
+'그럼', '거기', '그 설비' 등 대명사는 이전 대화에서 언급된 대상을 참조합니다.
+```
+
+> **핵심**: "대화 요약" 요청은 장비/부하율/알림/Lot과 무관한 **일반 대화**.
+> 단, 이전 이력을 "참조"해야 의미가 있는 질문이므로 IntentAgent에서는 문제없이 `general_chat`으로 분류.
+> 진짜 문제는 ResponseAgent가 이력을 받느냐 여부.
+
+#### 🔶 FM 출력 (← Gemini)
+```json
+{
+  "intent": "general_chat",
+  "detail": {"equipment_type": "", "line": "", "zone": "", "equipment_id": "", "lot_id": "", "hours": 0, "keyword": ""},
+  "reasoning": "대화 요약 요청으로 물류 장비 도메인 질문이 아닌 일반 대화입니다."
+}
+```
+
+### 라우팅: general_chat → ResponseAgent 직행
+
+```
+route_by_intent("general_chat") → "respond_node"
+```
+
+### ResponseAgent (일반대화 — 이력 참조) — ⚡ 수정 포인트
+
+#### 수정 전 (Bug)
+```python
+# 수정 전: user_input만 전달 → FM이 이전 대화를 모름
+response = simple_llm.invoke([
+    SystemMessage(content=chat_system),
+    HumanMessage(content=user_input),  # "지금까지 우리 나눈 대화 요약해줘" 단독
+])
+```
+> FM은 이전 대화가 뭔지 전혀 모르므로 "죄송합니다만 이전 대화를 기억하지 못합니다" 같은 응답이 나옴.
+
+#### 수정 후 (Fix)
+```python
+# 수정 후: conversation_history를 포함하여 전달
+history = state.get("conversation_history", [])
+if history:
+    ctx_lines = ["[이전 대화 이력]"]
+    for h in history[-5:]:
+        ctx_lines.append(f"사용자: {h['user']}")
+        ctx_lines.append(f"의도: {h.get('intent', '')}")
+        ctx_lines.append(f"응답 요약: {h.get('answer', '')[:150]}")
+        ctx_lines.append("")
+    ctx_lines.append(f"[현재 질문]\n{user_input}")
+    human_content = "\n".join(ctx_lines)
+else:
+    human_content = user_input
+
+response = simple_llm.invoke([
+    SystemMessage(content=chat_system),
+    HumanMessage(content=human_content),  # 이력 + 현재 질문
+])
+```
+
+#### 🔷 FM 입력 (→ Gemini gemini-2.0-flash, 일반대화 — 이력 포함)
+- **System**: "당신은 친절한 물류 장비 관리 시스템 어시스턴트입니다. 물류와 무관한 질문에는 간단히 답하고, 물류 관련 질문을 유도하세요." (69자)
+- **Human** (conversation_history 4턴 포함):
+```
+[이전 대화 이력]
+사용자: 요즘 날씨 너무 덥다
+의도: general_chat
+응답 요약: 정말 덥죠! 이런 날씨에는 장비 온도 관리도 중요한데요...
+
+사용자: L1 장비 부하율 어때?
+의도: load_rate_query
+응답 요약: 📊 L1 라인 장비 부하율 현황: CVR-L1-CELL-01 99.8% ⚠ 과부하, AGV-L1-CELL-01 99.1% ⚠ 과부하...
+
+사용자: 점심 뭐 먹지?
+의도: general_chat
+응답 요약: 더운 날씨엔 냉면이나 냉모밀 어떠세요? 🍜 식사 후에 장비 상태 점검도 잊지 마세요!
+
+사용자: 알림 이력 최근꺼 보여줘
+의도: alert_check
+응답 요약: 🔔 최근 알림 이력: OVERLOAD 3건(CVR-L1-CELL-01, AGV-L1-CELL-01, SHT-L3-CELL-01), WARNING 1건...
+
+[현재 질문]
+지금까지 우리 나눈 대화 요약해줘
+```
+
+> **핵심**: IntentAgent의 `_build_context()`와 동일한 패턴으로 이력을 포함.
+> FM이 4턴의 대화 맥락을 모두 볼 수 있으므로 정확한 요약이 가능.
+
+#### 🔶 FM 출력 (← Gemini)
+```
+지금까지 나눈 대화를 정리해드릴게요! 📋
+
+1. 날씨 이야기 — 요즘 날씨가 덥다는 대화를 나눴어요
+2. L1 장비 부하율 조회 — CELL 구간의 CVR(99.8%)과 AGV(99.1%)가 과부하 상태였어요 ⚠
+3. 점심 메뉴 고민 — 냉면/냉모밀을 추천해드렸죠 🍜
+4. 알림 이력 확인 — OVERLOAD 알림 3건, WARNING 1건으로 CELL 구간에 집중되어 있었어요
+
+전반적으로 CELL 구간 장비 과부하가 눈에 띄는데, 추가 점검이 필요하시면 말씀해주세요!
+```
+
+> **포인트**: 일반대화(Turn 1, 3)와 도메인 조회(Turn 2, 4) 결과를 **모두 포함**하여 요약.
+> `conversation_history` 주입 덕분에 FM이 전체 대화 맥락을 파악.
+
+### 대화 이력 저장
+```python
+conversation_history = [
+    {"user": "요즘 날씨 너무 덥다", "intent": "general_chat", ...},
+    {"user": "L1 장비 부하율 어때?", "intent": "load_rate_query", ...},
+    {"user": "점심 뭐 먹지?", "intent": "general_chat", ...},
+    {"user": "알림 이력 최근꺼 보여줘", "intent": "alert_check", ...},
+    {"user": "지금까지 우리 나눈 대화 요약해줘", "intent": "general_chat",
+     "answer": "지금까지 나눈 대화를 정리해드릴게요! 📋 1. 날씨 이야기..."}
+]
+```
+
+**Turn 5 FM 호출: 2회** (IntentAgent + ResponseAgent)
+
+---
+
+## FM 호출 요약 (5턴 전체)
 
 | 턴 | 질문 | 이력 상태 | 의도 | 경로 | FM 호출 |
 |----|------|----------|------|------|---------|
@@ -407,8 +554,9 @@ conversation_history = [
 | 2 | "L1 장비 부하율 어때?" | 1턴 (general) | `load_rate_query` | Intent → Info → Tool → Info → Respond | **3회** |
 | 3 | "점심 뭐 먹지?" | 2턴 (general+domain) | `general_chat` | Intent → **Respond** | **2회** |
 | 4 | "알림 이력 최근꺼 보여줘" | 3턴 (mixed) | `alert_check` | Intent → Info → Tool → Info → Respond | **3회** |
+| 5 | "지금까지 우리 나눈 대화 요약해줘" | 4턴 (mixed) | `general_chat` | Intent → **Respond (이력 포함)** | **2회** |
 
-**총 FM 호출: 10회** (general_chat 턴은 2회씩, 도메인 턴은 3회씩)
+**총 FM 호출: 12회** (general_chat 턴은 2회씩, 도메인 턴은 3회씩)
 
 ---
 
@@ -419,10 +567,12 @@ Turn 1: general_chat      ─── 일반 ───╮
 Turn 2: load_rate_query    ─── 도메인 ─╯ ↔ 전환
 Turn 3: general_chat       ─── 일반 ───╮
 Turn 4: alert_check        ─── 도메인 ─╯ ↔ 전환
+Turn 5: general_chat       ─── 일반 (이력 참조) ── 마무리
 ```
 
 > 도메인 전환도 2가지: Turn 2는 `load_rate_query`, Turn 4는 `alert_check`.
 > 같은 도메인으로 돌아가는 게 아니라 **다른 의도**로 돌아감.
+> Turn 5는 같은 `general_chat`이지만 Turn 1, 3과 성격이 다름 — **이력 참조가 필수**인 일반 대화.
 
 ---
 
@@ -434,8 +584,10 @@ Turn 4: alert_check        ─── 도메인 ─╯ ↔ 전환
 | 2 | `[general_chat]` | 이력 1건 추가 |
 | 3 | `[general_chat, load_rate_query]` | 이력 2건 (도메인 응답은 길어서 토큰 증가) |
 | 4 | `[general_chat, load_rate_query, general_chat]` | 이력 3건 (혼합) |
+| 5 | `[general_chat, load_rate_query, general_chat, alert_check]` | 이력 4건 (혼합, ResponseAgent도 이력 수신) |
 
 > 이력이 쌓일수록 FM 입력 토큰이 증가하지만, `_build_context()`가 응답을 150자로 잘라서 제한.
+> Turn 5부터는 ResponseAgent도 동일한 이력 포맷을 사용하므로 IntentAgent와 토큰 사용량이 유사.
 
 ---
 
@@ -451,4 +603,6 @@ Turn 4: alert_check        ─── 도메인 ─╯ ↔ 전환
 
 5. **messages 리셋 vs history 유지**: `messages`(Tool 호출 히스토리)는 매 턴 리셋되어 이전 턴의 Tool 결과가 유출되지 않음. 반면 `conversation_history`는 턴마다 누적되어 FM의 문맥 참고용으로 제공. 이 두 가지 분리가 핑퐁 전환을 깔끔하게 만드는 설계.
 
-6. **토큰 비용 패턴**: general_chat 턴은 FM 2회(경량), 도메인 턴은 FM 3회(중량). 4턴 기준 총 10회 호출. 일반대화가 많을수록 비용 절약, 도메인 질문이 많을수록 비용 증가. 실제 운영에서는 이 비율이 비용 예측에 중요.
+6. **토큰 비용 패턴**: general_chat 턴은 FM 2회(경량), 도메인 턴은 FM 3회(중량). 5턴 기준 총 12회 호출. 일반대화가 많을수록 비용 절약, 도메인 질문이 많을수록 비용 증가. 실제 운영에서는 이 비율이 비용 예측에 중요.
+
+7. **이력 참조형 일반 대화 (Turn 5에서 발견한 버그와 수정)**: `general_chat`이라도 "대화 요약해줘", "아까 뭐라고 했지?" 같은 **이력 참조가 필요한 질문**이 존재. 수정 전 `respond_node`는 `user_input`만 FM에 전달하여 이런 질문에 답할 수 없었음. `IntentAgent._build_context()`와 동일한 패턴으로 `conversation_history`를 `ResponseAgent`에도 주입하여 해결. 같은 의도(`general_chat`)라도 **단발성**(날씨, 점심)과 **이력 참조형**(요약, 아까 뭐라고 했지?)으로 성격이 다를 수 있다는 교훈.
