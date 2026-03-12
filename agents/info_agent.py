@@ -58,11 +58,51 @@ def react_agent_node(state: AgentState) -> dict:
     ]
 
     try:
-        result = react_agent.invoke(
+        react_messages = []
+        round_num = 0
+
+        for chunk in react_agent.stream(
             {"messages": [HumanMessage(content=prompt)]},
             config={"recursion_limit": 10},
-        )
-        react_messages = result["messages"]
+            stream_mode="updates",
+        ):
+            for node_name, node_output in chunk.items():
+                node_msgs = node_output.get("messages", [])
+                react_messages.extend(node_msgs)
+
+                if node_name == "agent":
+                    round_num += 1
+                    trace.append(f"\n#### 🤖 Agent Node (Round {round_num})")
+                    # Agent 입력: 현재 메시지 수
+                    input_count = len(react_messages) - len(node_msgs)
+                    trace.append(f"- **입력**: 메시지 {input_count}건")
+                    # Agent 출력
+                    for msg in node_msgs:
+                        if isinstance(msg, AIMessage):
+                            if msg.tool_calls:
+                                trace.append(f"- **🔶 출력 → Tool 호출 요청**:")
+                                for tc in msg.tool_calls:
+                                    trace.append(f"  - `{tc['name']}({tc['args']})`")
+                            else:
+                                trace.append(f"- **🔶 출력 → 텍스트 응답**:")
+                                trace.append(f"  ```")
+                                trace.append(f"  {msg.content[:500]}")
+                                trace.append(f"  ```")
+
+                elif node_name == "tools":
+                    trace.append(f"\n#### 🔧 Tools Node (Round {round_num})")
+                    for msg in node_msgs:
+                        if isinstance(msg, ToolMessage):
+                            content_preview = msg.content[:500]
+                            trace.append(f"- **{msg.name}** 실행 결과 ({len(msg.content)}자):")
+                            trace.append(f"  ```")
+                            trace.append(f"  {content_preview}")
+                            if len(msg.content) > 500:
+                                trace.append(f"  [...{len(msg.content) - 500}자 생략]")
+                            trace.append(f"  ```")
+
+        trace.append(f"\n#### 요약: Agent {round_num}라운드 완료, 총 메시지 {len(react_messages)}건")
+
     except Exception as e:
         error_msg = f"ReAct Agent 호출 실패: {type(e).__name__}: {e}"
         trace.append(f"### ERROR\n- `{error_msg}`")
@@ -71,20 +111,6 @@ def react_agent_node(state: AgentState) -> dict:
             "messages": [fallback],
             "trace_log": state.get("trace_log", []) + trace,
         }
-
-    # Trace: ReAct Agent 실행 로그
-    trace.append("### ReAct Agent 실행 로그")
-    for msg in react_messages:
-        if isinstance(msg, HumanMessage):
-            trace.append(f"- **HumanMessage**: {msg.content[:200]}")
-        elif isinstance(msg, AIMessage):
-            if msg.tool_calls:
-                calls = ", ".join(f"{tc['name']}({tc['args']})" for tc in msg.tool_calls)
-                trace.append(f"- **AIMessage** [tool_calls]: `{calls}`")
-            else:
-                trace.append(f"- **🔶 AIMessage (최종 응답)**: {msg.content[:300]}")
-        elif isinstance(msg, ToolMessage):
-            trace.append(f"- **ToolMessage** (tool=`{msg.name}`): `{msg.content[:300]}`")
 
     # State AFTER
     updated = dict(state)
