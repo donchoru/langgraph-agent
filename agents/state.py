@@ -7,12 +7,10 @@ from langchain_core.messages import BaseMessage, AIMessage, HumanMessage, ToolMe
 class AgentState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
     intent: str            # 분류된 의도
-    intent_detail: str     # 의도 상세 (JSON 문자열)
     trace_log: list[str]   # 트레이스 로그 라인
     user_input: str        # 원본 사용자 입력
     final_answer: str      # 최종 응답
     conversation_history: list[dict]  # 이전 턴 이력 [{"user": "...", "answer": "...", "intent": "..."}]
-    tool_call_round: int   # 도구 호출 라운드 카운터 (무한 루프 방지, 기본 0)
 
 
 def _fmt_message(msg: BaseMessage) -> str:
@@ -43,7 +41,6 @@ def dump_state(state: AgentState) -> list[str]:
         "### State Snapshot",
         f"- **user_input**: `{state.get('user_input', '')}`",
         f"- **intent**: `{state.get('intent', '')}`",
-        f"- **intent_detail**: `{state.get('intent_detail', '')}`",
         f"- **final_answer**: `{(state.get('final_answer', '') or '')[:200]}`",
         f"- **conversation_history** ({len(history)}턴):",
     ]

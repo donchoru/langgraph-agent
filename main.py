@@ -58,7 +58,6 @@ def main():
             result = app.invoke({
                 "messages": [],
                 "intent": "",
-                "intent_detail": "",
                 "trace_log": [],
                 "user_input": user_input,
                 "final_answer": "",

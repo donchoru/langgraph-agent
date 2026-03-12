@@ -2,12 +2,11 @@
 from config import LLM_TYPE, LLM_MODEL, LLM_API_KEY, LLM_BASE_URL, LLM_TEMPERATURE
 
 
-def create_llm(temperature: float | None = None, bind_tools: list | None = None):
+def create_llm(temperature: float | None = None):
     """LLM 인스턴스 생성.
 
     Args:
         temperature: 온도 (None이면 config 기본값 사용)
-        bind_tools: 바인딩할 도구 리스트 (None이면 도구 없음)
     """
     temp = temperature if temperature is not None else LLM_TEMPERATURE
 
@@ -27,8 +26,5 @@ def create_llm(temperature: float | None = None, bind_tools: list | None = None)
             base_url=LLM_BASE_URL,
             temperature=temp,
         )
-
-    if bind_tools:
-        llm = llm.bind_tools(bind_tools)
 
     return llm
